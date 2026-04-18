@@ -33,21 +33,21 @@ use crate::catalogue::Catalogue;
 // ── Handles ────────────────────────────────────────────────────────────────
 
 /// Zero-cost handle to a [`Dimension`] resolved against a schema.
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub(crate) struct DimHandle<'s> {
     /// The borrowed dimension definition.
     pub(crate) dim: &'s Dimension,
 }
 
 /// Zero-cost handle to a [`Hierarchy`] resolved against a schema's dimension.
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub(crate) struct HierarchyHandle<'s> {
     /// The borrowed hierarchy definition.
     pub(crate) hierarchy: &'s Hierarchy,
 }
 
 /// Zero-cost handle to a [`Level`] within a hierarchy.
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub(crate) struct LevelHandle<'s> {
     /// The borrowed level definition.
     pub(crate) level: &'s Level,
@@ -208,7 +208,7 @@ pub(crate) enum ResolvedSet<'s> {
 
 /// A member reference whose `dim`/`hierarchy` have been resolved and whose
 /// `path` has been validated against the catalogue.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub(crate) struct ResolvedMember<'s> {
     /// The dimension.
     pub(crate) dim: DimHandle<'s>,
@@ -222,10 +222,21 @@ pub(crate) struct ResolvedMember<'s> {
 
 /// Resolved counterpart of [`Tuple`] — every member has been located in the
 /// catalogue.
-#[derive(Debug)]
+///
+/// `Eq` / `Hash` delegate through `members`, which lets Phase 5d dedup
+/// tuples in `Union` evaluation.
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub(crate) struct ResolvedTuple<'s> {
     /// The members; per `Tuple::of`, dims are already distinct.
     pub(crate) members: Vec<ResolvedMember<'s>>,
+}
+
+impl<'s> ResolvedTuple<'s> {
+    /// Construct a resolved tuple from a member list. Phase 5d calls this
+    /// when assembling cross-join products and flat one-member tuples.
+    pub(crate) fn from_members(members: Vec<ResolvedMember<'s>>) -> Self {
+        Self { members }
+    }
 }
 
 /// Resolved counterpart of [`Predicate`] — metric refs and dims have been

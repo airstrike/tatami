@@ -13,6 +13,7 @@
 //! land.
 
 mod catalogue;
+mod eval;
 mod resolve;
 
 use polars_core::prelude::{Column, DataFrame, DataType};
@@ -368,6 +369,55 @@ pub enum Error {
     ResolveSetCompositionIllFormed {
         /// Human-readable reason.
         reason: &'static str,
+    },
+
+    // ── Phase 5d: set evaluation (deferred variants) ───────────────────
+    //
+    // `Set::Filter` and `Set::TopN` both require the metric evaluator
+    // (Phase 5f) to materialise their semantics. Phase 5d's set evaluator
+    // surfaces these variants as typed errors rather than panicking or
+    // silently returning empty vectors, so the phase-boundary is explicit.
+    /// `Set::Filter` evaluation needs metric evaluation to be wired up.
+    ///
+    /// Phase 5d returns this variant for every `ResolvedSet::Filter` it
+    /// encounters; Phase 5g replaces the short-circuit with a real
+    /// predicate evaluator once Phase 5f's metric evaluator lands.
+    #[error(
+        "set evaluation: Filter requires metric evaluation — implemented in Phase 5g after 5f metric evaluator lands"
+    )]
+    FilterDeferredToMetricEval,
+
+    /// `Set::TopN` evaluation needs metric evaluation to be wired up.
+    ///
+    /// Phase 5d returns this variant for every `ResolvedSet::TopN` it
+    /// encounters; Phase 5g replaces the short-circuit with a real
+    /// ranking evaluator once Phase 5f's metric evaluator lands.
+    #[error(
+        "set evaluation: TopN requires metric evaluation — implemented in Phase 5g after 5f metric evaluator lands"
+    )]
+    TopNDeferredToMetricEval,
+
+    /// A set evaluator reached a `ResolvedSet` whose shape it could not
+    /// evaluate — for example, a cross-join as the argument of `Children`,
+    /// or an `Explicit` set with members spanning multiple dims under
+    /// `Children`.
+    #[error("set evaluation: ill-formed composition: {reason}")]
+    EvalSetCompositionIllFormed {
+        /// Human-readable reason.
+        reason: &'static str,
+    },
+
+    /// A `Range` endpoint comparison in the catalogue indicated the `from`
+    /// path sorts after the `to` path. `from <= to` is a structural
+    /// precondition of `Set::Range`; this variant surfaces the violation
+    /// when the catalogue's traversal order disagrees with the caller's
+    /// declared direction.
+    #[error("set evaluation: range endpoints inverted: {from} sorts after {to}")]
+    EvalRangeInverted {
+        /// Offending lower endpoint.
+        from: Path,
+        /// Offending upper endpoint.
+        to: Path,
     },
 }
 
