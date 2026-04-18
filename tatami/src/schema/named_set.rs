@@ -41,9 +41,7 @@ mod tests {
     fn named_set_roundtrips() {
         let ns = NamedSet::new(
             n("TopRegions"),
-            Set::Children {
-                of: MemberRef::new(n("Geography"), n("Default"), Path::of(n("World"))),
-            },
+            MemberRef::new(n("Geography"), n("Default"), Path::of(n("World"))).children(),
         );
         let json = serde_json::to_string(&ns).expect("serialize");
         let back: NamedSet = serde_json::from_str(&json).expect("deserialize");

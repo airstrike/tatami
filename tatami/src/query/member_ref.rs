@@ -2,7 +2,7 @@
 
 use serde::{Deserialize, Serialize};
 
-use crate::query::Path;
+use crate::query::{Path, Set};
 use crate::schema::Name;
 
 /// Fully-qualified reference to a single member in a hierarchy —
@@ -75,6 +75,23 @@ impl MemberRef {
             Self::new(dim.clone(), hierarchy.clone(), Path::of(from)),
             Self::new(dim, hierarchy, Path::of(to)),
         )
+    }
+
+    /// Tidy-path sugar for "children of this one member":
+    /// `Set::from_member(self).children()`.
+    ///
+    /// Equivalent to the explicit form but reads naturally in a chain —
+    /// `MemberRef::world().children()`.
+    #[must_use]
+    pub fn children(self) -> Set {
+        Set::from_member(self).children()
+    }
+
+    /// Tidy-path sugar for "descendants of this one member, to `to_level`":
+    /// `Set::from_member(self).descendants_to(to_level)`.
+    #[must_use]
+    pub fn descendants_to(self, to_level: Name) -> Set {
+        Set::from_member(self).descendants_to(to_level)
     }
 }
 

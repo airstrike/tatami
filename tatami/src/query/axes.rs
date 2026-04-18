@@ -52,6 +52,36 @@ pub enum Axes {
     },
 }
 
+impl Axes {
+    /// The `pivot_wider` / `pivot_longer` shape-switch — swaps the rows
+    /// and columns axes where both exist; identity otherwise.
+    ///
+    /// - [`Axes::Scalar`] → [`Axes::Scalar`] (nothing to swap).
+    /// - [`Axes::Series`] → [`Axes::Series`] (one axis — identity).
+    /// - [`Axes::Pivot`] → swap `rows` and `columns`.
+    /// - [`Axes::Pages`] → swap `rows` and `columns`; `pages` is preserved.
+    #[must_use]
+    pub fn transpose(self) -> Self {
+        match self {
+            Self::Scalar => Self::Scalar,
+            Self::Series { rows } => Self::Series { rows },
+            Self::Pivot { rows, columns } => Self::Pivot {
+                rows: columns,
+                columns: rows,
+            },
+            Self::Pages {
+                rows,
+                columns,
+                pages,
+            } => Self::Pages {
+                rows: columns,
+                columns: rows,
+                pages,
+            },
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -74,9 +104,7 @@ mod tests {
     #[test]
     fn series_roundtrips() {
         let a = Axes::Series {
-            rows: Set::Children {
-                of: MemberRef::new(n("Geography"), n("Default"), Path::of(n("World"))),
-            },
+            rows: MemberRef::new(n("Geography"), n("Default"), Path::of(n("World"))).children(),
         };
         let json = serde_json::to_string(&a).expect("serialize");
         let back: Axes = serde_json::from_str(&json).expect("deserialize");
@@ -124,5 +152,63 @@ mod tests {
         let json = serde_json::to_string(&a).expect("serialize");
         let back: Axes = serde_json::from_str(&json).expect("deserialize");
         assert_eq!(a, back);
+    }
+
+    #[test]
+    fn transpose_swaps_rows_and_columns_on_pivot() {
+        let rows = Set::Members {
+            dim: n("Time"),
+            hierarchy: n("Fiscal"),
+            level: n("Quarter"),
+        };
+        let columns = Set::Members {
+            dim: n("Geography"),
+            hierarchy: n("Default"),
+            level: n("Region"),
+        };
+        let pivot = Axes::Pivot {
+            rows: rows.clone(),
+            columns: columns.clone(),
+        };
+        assert_eq!(
+            pivot.transpose(),
+            Axes::Pivot {
+                rows: columns.clone(),
+                columns: rows.clone(),
+            },
+        );
+
+        let pages = Set::Members {
+            dim: n("Scenario"),
+            hierarchy: n("Default"),
+            level: n("Name"),
+        };
+        let full = Axes::Pages {
+            rows: rows.clone(),
+            columns: columns.clone(),
+            pages: pages.clone(),
+        };
+        assert_eq!(
+            full.transpose(),
+            Axes::Pages {
+                rows: columns,
+                columns: rows,
+                pages,
+            },
+        );
+    }
+
+    #[test]
+    fn transpose_is_identity_on_scalar_and_series() {
+        assert_eq!(Axes::Scalar.transpose(), Axes::Scalar);
+
+        let series = Axes::Series {
+            rows: Set::Members {
+                dim: n("Geography"),
+                hierarchy: n("Default"),
+                level: n("Country"),
+            },
+        };
+        assert_eq!(series.clone().transpose(), series);
     }
 }

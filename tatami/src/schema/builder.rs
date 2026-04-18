@@ -273,7 +273,7 @@ fn check_refs(metric: &Name, expr: &MetricExpr, known: &HashSet<&Name>) -> Resul
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::query::{MemberRef, Path, Set};
+    use crate::query::{MemberRef, Path};
     use crate::schema::{Aggregation, BinOp, Dimension};
 
     fn n(s: &str) -> Name {
@@ -373,9 +373,7 @@ mod tests {
             .measure(Measure::new(n("amount"), Aggregation::sum()))
             .named_set(NamedSet::new(
                 n("TopRegions"),
-                Set::Children {
-                    of: MemberRef::new(n("Geography"), n("Default"), Path::of(n("World"))),
-                },
+                MemberRef::new(n("Geography"), n("Default"), Path::of(n("World"))).children(),
             ))
             .build()
             .expect("valid");
@@ -387,9 +385,7 @@ mod tests {
         let ns = || {
             NamedSet::new(
                 n("TopRegions"),
-                Set::Children {
-                    of: MemberRef::new(n("Geography"), n("Default"), Path::of(n("World"))),
-                },
+                MemberRef::new(n("Geography"), n("Default"), Path::of(n("World"))).children(),
             )
         };
         let err = Schema::builder()
@@ -409,9 +405,7 @@ mod tests {
             .measure(Measure::new(n("amount"), Aggregation::sum()))
             .named_set(NamedSet::new(
                 n("amount"),
-                Set::Children {
-                    of: MemberRef::new(n("Geography"), n("Default"), Path::of(n("World"))),
-                },
+                MemberRef::new(n("Geography"), n("Default"), Path::of(n("World"))).children(),
             ))
             .build()
             .expect_err("named set collides with measure");

@@ -2,11 +2,13 @@
 //!
 //! Each test constructs a query programmatically, serializes to JSON,
 //! deserializes back, and asserts byte-stable roundtrip equality against
-//! the original value. Where MAP §3.5's literal example relies on a
-//! signature that the types don't support (e.g. using
-//! `MemberRef::range` — which returns `(MemberRef, MemberRef)` — as a
-//! single `MemberRef`), the test uses the closest legal form and a
-//! comment notes the adjustment.
+//! the original value.
+//!
+//! §3.5(b) — "Quarterly Revenue by Region, FY2025–FY2030" — uses the
+//! tidy-form `Set::range(...).descendants_to(Quarter)`, which is only
+//! legal because `Set::Descendants { of: Box<Set> }` is closed under the
+//! algebra. An extra `descendants_of_union_roundtrips` test below
+//! demonstrates the same closure with `Union`.
 
 use tatami::query::{Set, Tuple};
 use tatami::schema::Name;
@@ -40,16 +42,17 @@ fn fy2026_revenue_with_mom_delta_scalar_roundtrips() {
 
 #[test]
 fn quarterly_revenue_by_region_pivot_roundtrips() {
-    // MAP §3.5(b) illustrates "Descendants over a Time range FY2025..FY2030".
-    // `Set::Descendants.of` is a single `MemberRef`, so we use the range's
-    // lower endpoint here; the resolve stage (§3.6) is where range-shaped
-    // drill-down will be expressed via `Set::CrossJoin(Set::Range, …)`.
+    // MAP §3.5(b) — "Descendants of a Time range FY2025..FY2030".
+    // Expressible directly now that `Set::Descendants.of` is a full `Set`.
     let q = Query {
         axes: Axes::Pivot {
-            rows: Set::Descendants {
-                of: MemberRef::time(n("FY2025")),
-                to_level: n("Quarter"),
-            },
+            rows: Set::range(
+                n("Time"),
+                n("Fiscal"),
+                MemberRef::time(n("FY2025")),
+                MemberRef::time(n("FY2030")),
+            )
+            .descendants_to(n("Quarter")),
             columns: Set::Members {
                 dim: n("Geography"),
                 hierarchy: n("Default"),
@@ -92,10 +95,8 @@ fn aop_plan_vs_whatif_pivot_roundtrips() {
 fn sales_volume_by_territory_series_roundtrips() {
     let q = Query {
         axes: Axes::Series {
-            rows: Set::Descendants {
-                of: MemberRef::world(),
-                to_level: n("Country"),
-            },
+            // MAP §3.5(d) — tidy form: `MemberRef::world().descendants_to(Country)`.
+            rows: MemberRef::world().descendants_to(n("Country")),
         },
         slicer: Tuple::of([
             MemberRef::time(n("FY2026")),
@@ -103,6 +104,24 @@ fn sales_volume_by_territory_series_roundtrips() {
         ])
         .expect("distinct dims"),
         metrics: vec![n("Units")],
+        options: QueryOptions::default(),
+    };
+    roundtrip(&q);
+}
+
+#[test]
+fn descendants_of_union_roundtrips() {
+    // Closure demonstration: `Set::Descendants { of: Box<Set> }` admits
+    // a `Union` under it — previously impossible when `of: MemberRef`.
+    let q = Query {
+        axes: Axes::Series {
+            rows: Set::union(
+                MemberRef::time(n("FY2025")).descendants_to(n("Quarter")),
+                MemberRef::time(n("FY2026")).descendants_to(n("Quarter")),
+            ),
+        },
+        slicer: Tuple::of([MemberRef::scenario(n("Actual"))]).expect("distinct dims"),
+        metrics: vec![n("Revenue")],
         options: QueryOptions::default(),
     };
     roundtrip(&q);
