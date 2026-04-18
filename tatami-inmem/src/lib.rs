@@ -35,9 +35,7 @@ use crate::catalogue::Catalogue;
 pub struct InMemoryCube {
     pub(crate) schema: Schema,
     pub(crate) catalogue: Catalogue,
-    // Prefixed with `_` to silence dead-code warnings until Phase 5d–g wires
-    // the fact frame into evaluation. Renamed to `df` at that point.
-    _df: DataFrame,
+    pub(crate) df: DataFrame,
 }
 
 impl InMemoryCube {
@@ -64,7 +62,7 @@ impl InMemoryCube {
         Ok(Self {
             schema,
             catalogue,
-            _df: df,
+            df,
         })
     }
 
@@ -74,6 +72,14 @@ impl InMemoryCube {
     #[allow(dead_code)]
     pub(crate) fn catalogue(&self) -> &Catalogue {
         &self.catalogue
+    }
+
+    /// Crate-internal accessor for the fact frame. Phase 5f's metric
+    /// evaluator reaches through this to resolve `Ref` leaves via
+    /// [`crate::eval::aggregate::evaluate_measure`].
+    #[allow(dead_code)]
+    pub(crate) fn df(&self) -> &DataFrame {
+        &self.df
     }
 
     /// Lift a public [`Query`] into a crate-internal `ResolvedQuery` bound
@@ -455,6 +461,32 @@ pub enum Error {
         measure: Name,
         /// The polars error text (or internal reason string).
         reason: String,
+    },
+
+    // ── Phase 5f: metric expression evaluation ─────────────────────────
+    //
+    // The metric-tree evaluator (`crate::eval::metric::evaluate_expr`) is
+    // mostly total — arithmetic failures and unbound dims surface as
+    // `Cell::Error` / `Cell::Missing` rather than `Result::Err`. The two
+    // genuine error paths are defensive: a name that resolve (5c) did not
+    // flag, and a metric-to-metric cycle (5c checks name existence, not
+    // recursion shape).
+    /// A metric expression's `Ref` did not resolve to any measure or
+    /// metric at eval time. Phase 5c should rule this out structurally;
+    /// the variant is defensive so the recursion stays total.
+    #[error("metric evaluation: unresolved reference {name}")]
+    EvalUnresolvedRef {
+        /// The name the reference pointed at.
+        name: Name,
+    },
+
+    /// A metric's expression transitively references itself through one or
+    /// more metric-to-metric hops. Surfaced the first time the evaluator
+    /// would revisit an already-entered metric.
+    #[error("metric evaluation: metric {name} participates in a cycle")]
+    EvalMetricCycle {
+        /// The metric at which the cycle was detected.
+        name: Name,
     },
 }
 

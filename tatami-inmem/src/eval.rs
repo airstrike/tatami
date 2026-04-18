@@ -25,5 +25,6 @@
 //! [`ResolvedTuple`]: crate::resolve::ResolvedTuple
 
 pub(crate) mod aggregate;
+pub(crate) mod metric;
 pub(crate) mod set;
 pub(crate) mod tuple;
