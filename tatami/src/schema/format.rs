@@ -1,28 +1,23 @@
-//! Opaque [`Format`] — a validated formatter-string.
+//! Opaque [`Format`] — a formatter string (`"0.0%"`, `"$#,##0.00"`, etc.).
+//!
+//! v0.1 wraps any string; format-spec parsing lands when a renderer needs
+//! to interpret these. Construction is total, so `From<&str>` and
+//! `From<String>` are both infallible.
 
 use std::fmt;
 
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
-/// Formatter string — `"0.0%"`, `"$#,##0.00"`. Phase 1 validates only
-/// non-emptiness; format-spec parsing is out of scope until a concrete
-/// renderer needs it.
-///
-/// Serde-transparent: a JSON `Format` is a plain string.
+/// Formatter string. Serde-transparent — a JSON `Format` is a plain string.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct Format(String);
 
 impl Format {
-    /// Parse a format at the boundary. Rejects empty / whitespace-only
-    /// inputs.
-    pub fn parse(s: &str) -> Result<Self, Error> {
-        if s.is_empty() {
-            return Err(Error::Empty);
-        }
-        if s.trim().is_empty() {
-            return Err(Error::WhitespaceOnly);
-        }
-        Ok(Self(s.to_owned()))
+    /// Wrap any string as a `Format`. Total — no validation in v0.1;
+    /// format-spec parsing happens at the renderer.
+    #[must_use]
+    pub fn new(s: impl Into<String>) -> Self {
+        Self(s.into())
     }
 
     /// Borrow the underlying string.
@@ -33,14 +28,14 @@ impl Format {
 }
 
 impl From<&str> for Format {
-    /// Infallible construction — intended for **compile-time constants** like
-    /// `"0.0%"` where the format is known valid. Panics if the input is
-    /// empty / whitespace-only.
-    ///
-    /// For runtime / user-supplied input, use [`Format::parse`] which
-    /// returns `Result<Self, Error>`.
     fn from(s: &str) -> Self {
-        Self::parse(s).expect("format string is valid (non-empty, non-whitespace)")
+        Self::new(s)
+    }
+}
+
+impl From<String> for Format {
+    fn from(s: String) -> Self {
+        Self::new(s)
     }
 }
 
@@ -58,21 +53,9 @@ impl Serialize for Format {
 
 impl<'de> Deserialize<'de> for Format {
     fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
-        let raw = <&str>::deserialize(deserializer)?;
-        Self::parse(raw).map_err(serde::de::Error::custom)
+        let raw = String::deserialize(deserializer)?;
+        Ok(Self(raw))
     }
-}
-
-/// Errors produced by [`Format::parse`].
-#[derive(Debug, thiserror::Error)]
-#[non_exhaustive]
-pub enum Error {
-    /// The input was the empty string.
-    #[error("format must not be empty")]
-    Empty,
-    /// The input contained only whitespace.
-    #[error("format must not be whitespace-only")]
-    WhitespaceOnly,
 }
 
 #[cfg(test)]
@@ -80,30 +63,19 @@ mod tests {
     use super::*;
 
     #[test]
-    fn formats_accept_common_patterns() {
-        assert_eq!(Format::parse("0.0%").expect("valid").as_str(), "0.0%");
-        assert_eq!(
-            Format::parse("$#,##0.00").expect("valid").as_str(),
-            "$#,##0.00"
-        );
-    }
-
-    #[test]
-    fn formats_reject_empty() {
-        assert!(matches!(Format::parse(""), Err(Error::Empty)));
-    }
-
-    #[test]
-    fn formats_reject_whitespace_only() {
-        assert!(matches!(Format::parse("   "), Err(Error::WhitespaceOnly)));
-    }
-
-    #[test]
-    fn formats_roundtrip_as_plain_json_strings() {
-        let format = Format::parse("0.0%").expect("valid");
+    fn format_roundtrips_as_plain_json_string() {
+        let format = Format::new("0.0%");
         let json = serde_json::to_string(&format).expect("serialize");
         assert_eq!(json, "\"0.0%\"");
         let back: Format = serde_json::from_str(&json).expect("deserialize");
         assert_eq!(format, back);
+    }
+
+    #[test]
+    fn format_accepts_arbitrary_strings() {
+        // v0.1 validates nothing; the renderer interprets the spec at use.
+        assert_eq!(Format::new("").as_str(), "");
+        assert_eq!(Format::new("0.0%").as_str(), "0.0%");
+        assert_eq!(Format::from("$#,##0.00").as_str(), "$#,##0.00");
     }
 }

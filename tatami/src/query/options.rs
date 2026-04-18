@@ -1,4 +1,4 @@
-//! [`QueryOptions`], [`OrderBy`], [`Direction`] — query-level tuning knobs.
+//! [`Options`] (query-level tuning knobs), [`OrderBy`], [`Direction`].
 
 use std::num::NonZeroUsize;
 
@@ -9,7 +9,7 @@ use crate::schema::Name;
 /// Optional query-level tuning knobs. Defaults: no ordering, no limit, empty
 /// tuples kept.
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
-pub struct QueryOptions {
+pub struct Options {
     /// Orderings applied to the result rows, in priority order.
     pub order: Vec<OrderBy>,
     /// Cap on the number of rows returned. `None` means unlimited.
@@ -47,16 +47,16 @@ mod tests {
     }
 
     #[test]
-    fn default_query_options_roundtrip() {
-        let o = QueryOptions::default();
+    fn default_options_roundtrip() {
+        let o = Options::default();
         let json = serde_json::to_string(&o).expect("serialize");
-        let back: QueryOptions = serde_json::from_str(&json).expect("deserialize");
+        let back: Options = serde_json::from_str(&json).expect("deserialize");
         assert_eq!(o, back);
     }
 
     #[test]
-    fn query_options_with_order_and_limit_roundtrip() {
-        let o = QueryOptions {
+    fn options_with_order_and_limit_roundtrip() {
+        let o = Options {
             order: vec![OrderBy {
                 metric: n("Revenue"),
                 direction: Direction::Desc,
@@ -65,7 +65,7 @@ mod tests {
             non_empty: true,
         };
         let json = serde_json::to_string(&o).expect("serialize");
-        let back: QueryOptions = serde_json::from_str(&json).expect("deserialize");
+        let back: Options = serde_json::from_str(&json).expect("deserialize");
         assert_eq!(o, back);
     }
 

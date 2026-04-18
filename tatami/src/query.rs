@@ -18,7 +18,7 @@ use serde::{Deserialize, Serialize};
 pub use axes::Axes;
 pub use error::Error;
 pub use member_ref::MemberRef;
-pub use options::{Direction, OrderBy, QueryOptions};
+pub use options::{Direction, Options, OrderBy};
 pub use path::Path;
 pub use predicate::Predicate;
 pub use set::Set;
@@ -41,7 +41,7 @@ pub struct Query {
     /// The metrics to evaluate at each cell, in the order returned.
     pub metrics: Vec<Name>,
     /// Optional ordering, limit, and non-empty flag.
-    pub options: QueryOptions,
+    pub options: Options,
 }
 
 #[cfg(test)]
@@ -59,7 +59,7 @@ mod tests {
             axes: Axes::Scalar,
             slicer: Tuple::empty(),
             metrics: vec![n("Revenue")],
-            options: QueryOptions::default(),
+            options: Options::default(),
         };
         let json = serde_json::to_string(&q).expect("serialize");
         let back: Query = serde_json::from_str(&json).expect("deserialize");

@@ -1,11 +1,12 @@
-//! [`Dimension`] and its immediate components — [`DimKind`], [`Calendar`],
+//! [`Dimension`] and its immediate components — [`Kind`] (the dim kind),
+//! [`Calendar`],
 //! [`Hierarchy`], [`Level`].
 
 use serde::{Deserialize, Serialize};
 
 use crate::schema::{MonthDay, Name};
 
-/// A cube dimension — identified by name, typed by [`DimKind`], structured by
+/// A cube dimension — identified by name, typed by [`Kind`], structured by
 /// one or more [`Hierarchy`] entries.
 #[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct Dimension {
@@ -15,7 +16,7 @@ pub struct Dimension {
     /// this dimension.
     pub hierarchies: Vec<Hierarchy>,
     /// The structural kind of the dimension — regular, time, or scenario.
-    pub kind: DimKind,
+    pub kind: Kind,
 }
 
 impl Dimension {
@@ -25,7 +26,7 @@ impl Dimension {
         Self {
             name,
             hierarchies: Vec::new(),
-            kind: DimKind::Regular,
+            kind: Kind::Regular,
         }
     }
 
@@ -35,7 +36,7 @@ impl Dimension {
         Self {
             name,
             hierarchies: Vec::new(),
-            kind: DimKind::Time { calendars },
+            kind: Kind::Time { calendars },
         }
     }
 
@@ -45,7 +46,7 @@ impl Dimension {
         Self {
             name,
             hierarchies: Vec::new(),
-            kind: DimKind::Scenario,
+            kind: Kind::Scenario,
         }
     }
 
@@ -61,7 +62,7 @@ impl Dimension {
 #[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 #[non_exhaustive]
-pub enum DimKind {
+pub enum Kind {
     /// A regular dimension — geography, product, account.
     Regular,
     /// A time dimension, carrying one or more calendars (fiscal, Gregorian,
@@ -74,7 +75,7 @@ pub enum DimKind {
     Scenario,
 }
 
-/// A calendar attached to a [`DimKind::Time`] dimension.
+/// A calendar attached to a [`Kind::Time`] dimension.
 #[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct Calendar {
     /// Calendar name — `"Fiscal"`, `"Gregorian"`, `"Retail-4-4-5"`.

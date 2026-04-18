@@ -30,7 +30,7 @@
 use std::collections::HashSet;
 use std::marker::PhantomData;
 
-use crate::schema::{Dimension, Error, Measure, Metric, MetricExpr, Name, NamedSet, Schema};
+use crate::schema::{Dimension, Error, Measure, Metric, Name, NamedSet, Schema, metric};
 
 /// Typestate marker: no dimensions added yet.
 #[derive(Debug)]
@@ -175,7 +175,7 @@ impl Builder<HasDims, HasMeasures> {
     /// - Named set names are unique.
     /// - No name is shared between a measure / metric / named set
     ///   (they share one reference namespace).
-    /// - Every `MetricExpr::Ref { name }` resolves to a declared measure or
+    /// - Every `metric::Expr::Ref { name }` resolves to a declared measure or
     ///   metric.
     ///
     /// This is the single `Result` site in the schema pipeline.
@@ -247,9 +247,9 @@ impl Builder<HasDims, HasMeasures> {
     }
 }
 
-fn check_refs(metric: &Name, expr: &MetricExpr, known: &HashSet<&Name>) -> Result<(), Error> {
+fn check_refs(metric: &Name, expr: &metric::Expr, known: &HashSet<&Name>) -> Result<(), Error> {
     match expr {
-        MetricExpr::Ref { name } => {
+        metric::Expr::Ref { name } => {
             if !known.contains(name) {
                 return Err(Error::UnresolvedMetricRef {
                     metric: metric.clone(),
@@ -258,15 +258,15 @@ fn check_refs(metric: &Name, expr: &MetricExpr, known: &HashSet<&Name>) -> Resul
             }
             Ok(())
         }
-        MetricExpr::Const { .. } => Ok(()),
-        MetricExpr::Binary { l, r, .. } => {
+        metric::Expr::Const { .. } => Ok(()),
+        metric::Expr::Binary { l, r, .. } => {
             check_refs(metric, l, known)?;
             check_refs(metric, r, known)
         }
-        MetricExpr::Lag { of, .. } | MetricExpr::PeriodsToDate { of, .. } => {
+        metric::Expr::Lag { of, .. } | metric::Expr::PeriodsToDate { of, .. } => {
             check_refs(metric, of, known)
         }
-        MetricExpr::At { of, .. } => check_refs(metric, of, known),
+        metric::Expr::At { of, .. } => check_refs(metric, of, known),
     }
 }
 
@@ -287,7 +287,7 @@ mod tests {
             .measure(Measure::new(n("amount"), Aggregation::sum()))
             .metric(Metric::new(
                 n("Revenue"),
-                MetricExpr::Ref { name: n("amount") },
+                metric::Expr::Ref { name: n("amount") },
             ))
             .build()
             .expect("valid");
@@ -305,10 +305,10 @@ mod tests {
             .measure(Measure::new(n("cogs"), Aggregation::sum()))
             .metric(Metric::new(
                 n("GrossMargin"),
-                MetricExpr::Binary {
+                metric::Expr::Binary {
                     bin_op: BinOp::Sub,
-                    l: Box::new(MetricExpr::Ref { name: n("amount") }),
-                    r: Box::new(MetricExpr::Ref { name: n("cogs") }),
+                    l: Box::new(metric::Expr::Ref { name: n("amount") }),
+                    r: Box::new(metric::Expr::Ref { name: n("cogs") }),
                 },
             ))
             .build()
@@ -322,11 +322,11 @@ mod tests {
             .measure(Measure::new(n("amount"), Aggregation::sum()))
             .metric(Metric::new(
                 n("Revenue"),
-                MetricExpr::Ref { name: n("amount") },
+                metric::Expr::Ref { name: n("amount") },
             ))
             .metric(Metric::new(
                 n("Revenue"),
-                MetricExpr::Ref { name: n("amount") },
+                metric::Expr::Ref { name: n("amount") },
             ))
             .build()
             .expect_err("duplicate metric names");
@@ -338,7 +338,7 @@ mod tests {
         let err = Schema::builder()
             .dimension(Dimension::regular(n("Geography")))
             .measure(Measure::new(n("amount"), Aggregation::sum()))
-            .metric(Metric::new(n("amount"), MetricExpr::Const { value: 0.0 }))
+            .metric(Metric::new(n("amount"), metric::Expr::Const { value: 0.0 }))
             .build()
             .expect_err("name collision");
         assert!(matches!(err, Error::MeasureMetricNameCollision(_)));
@@ -351,11 +351,11 @@ mod tests {
             .measure(Measure::new(n("amount"), Aggregation::sum()))
             .metric(Metric::new(
                 n("Bad"),
-                MetricExpr::Binary {
+                metric::Expr::Binary {
                     bin_op: BinOp::Div,
-                    l: Box::new(MetricExpr::Ref { name: n("amount") }),
-                    r: Box::new(MetricExpr::Lag {
-                        of: Box::new(MetricExpr::Ref { name: n("NotHere") }),
+                    l: Box::new(metric::Expr::Ref { name: n("amount") }),
+                    r: Box::new(metric::Expr::Lag {
+                        of: Box::new(metric::Expr::Ref { name: n("NotHere") }),
                         dim: n("Time"),
                         n: 1,
                     }),

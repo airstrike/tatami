@@ -1,4 +1,4 @@
-//! [`Metric`], [`MetricExpr`], [`BinOp`].
+//! [`Metric`], [`Expr`] (formula tree), [`BinOp`].
 
 use serde::{Deserialize, Serialize};
 
@@ -12,7 +12,7 @@ pub struct Metric {
     /// Metric name; unique within a schema.
     pub name: Name,
     /// The formula tree.
-    pub expr: MetricExpr,
+    pub expr: Expr,
     /// Optional display unit.
     pub unit: Option<Unit>,
     /// Optional display format.
@@ -22,7 +22,7 @@ pub struct Metric {
 impl Metric {
     /// Construct a metric with no declared unit or format.
     #[must_use]
-    pub fn new(name: Name, expr: MetricExpr) -> Self {
+    pub fn new(name: Name, expr: Expr) -> Self {
         Self {
             name,
             expr,
@@ -54,7 +54,7 @@ impl Metric {
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "op", rename_all = "snake_case")]
 #[non_exhaustive]
-pub enum MetricExpr {
+pub enum Expr {
     /// Reference to a measure or metric by name.
     Ref {
         /// The name being referenced.
@@ -70,16 +70,16 @@ pub enum MetricExpr {
         /// The operator.
         bin_op: BinOp,
         /// Left operand.
-        l: Box<MetricExpr>,
+        l: Box<Expr>,
         /// Right operand.
-        r: Box<MetricExpr>,
+        r: Box<Expr>,
     },
     /// Lag along a time dimension — `YoY` with `n = 12` months, `MoM` with
-    /// `n = 1`. The `dim` must resolve to a `DimKind::Time` dim (checked
+    /// `n = 1`. The `dim` must resolve to a `dimension::Kind::Time` dim (checked
     /// in the Phase 5 resolve stage, not here).
     Lag {
         /// Sub-expression to lag.
-        of: Box<MetricExpr>,
+        of: Box<Expr>,
         /// The time dimension along which to lag.
         dim: Name,
         /// Lag offset (negative for lead).
@@ -88,20 +88,20 @@ pub enum MetricExpr {
     /// Periods-to-date — YTD / QTD / MTD depending on `level`.
     PeriodsToDate {
         /// Sub-expression to aggregate.
-        of: Box<MetricExpr>,
+        of: Box<Expr>,
         /// The level whose current period defines the window.
         level: Name,
     },
     /// Pin a coordinate — evaluate `of` at the tuple `at`.
     At {
         /// Sub-expression to evaluate at the fixed coordinate.
-        of: Box<MetricExpr>,
+        of: Box<Expr>,
         /// The coordinate to pin.
         at: Tuple,
     },
 }
 
-/// Binary operator for [`MetricExpr::Binary`].
+/// Binary operator for [`Expr::Binary`].
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 #[non_exhaustive]
@@ -127,61 +127,61 @@ mod tests {
 
     #[test]
     fn metric_ref_roundtrip_stable() {
-        let expr = MetricExpr::Ref { name: n("amount") };
+        let expr = Expr::Ref { name: n("amount") };
         let json = serde_json::to_string(&expr).expect("serialize");
         assert_eq!(json, r#"{"op":"ref","name":"amount"}"#);
-        let back: MetricExpr = serde_json::from_str(&json).expect("deserialize");
+        let back: Expr = serde_json::from_str(&json).expect("deserialize");
         assert_eq!(expr, back);
     }
 
     #[test]
     fn metric_const_roundtrip_stable() {
-        let expr = MetricExpr::Const { value: 0.5 };
+        let expr = Expr::Const { value: 0.5 };
         let json = serde_json::to_string(&expr).expect("serialize");
-        let back: MetricExpr = serde_json::from_str(&json).expect("deserialize");
+        let back: Expr = serde_json::from_str(&json).expect("deserialize");
         assert_eq!(expr, back);
     }
 
     #[test]
     fn metric_binary_div_roundtrip_stable() {
-        let expr = MetricExpr::Binary {
+        let expr = Expr::Binary {
             bin_op: BinOp::Div,
-            l: Box::new(MetricExpr::Ref { name: n("revenue") }),
-            r: Box::new(MetricExpr::Ref { name: n("cogs") }),
+            l: Box::new(Expr::Ref { name: n("revenue") }),
+            r: Box::new(Expr::Ref { name: n("cogs") }),
         };
         let json = serde_json::to_string(&expr).expect("serialize");
-        let back: MetricExpr = serde_json::from_str(&json).expect("deserialize");
+        let back: Expr = serde_json::from_str(&json).expect("deserialize");
         assert_eq!(expr, back);
     }
 
     #[test]
     fn metric_yoy_tree_roundtrips() {
-        let expr = MetricExpr::Binary {
+        let expr = Expr::Binary {
             bin_op: BinOp::Div,
-            l: Box::new(MetricExpr::Binary {
+            l: Box::new(Expr::Binary {
                 bin_op: BinOp::Sub,
-                l: Box::new(MetricExpr::Ref { name: n("Revenue") }),
-                r: Box::new(MetricExpr::Lag {
-                    of: Box::new(MetricExpr::Ref { name: n("Revenue") }),
+                l: Box::new(Expr::Ref { name: n("Revenue") }),
+                r: Box::new(Expr::Lag {
+                    of: Box::new(Expr::Ref { name: n("Revenue") }),
                     dim: n("Time"),
                     n: 12,
                 }),
             }),
-            r: Box::new(MetricExpr::Lag {
-                of: Box::new(MetricExpr::Ref { name: n("Revenue") }),
+            r: Box::new(Expr::Lag {
+                of: Box::new(Expr::Ref { name: n("Revenue") }),
                 dim: n("Time"),
                 n: 12,
             }),
         };
         let json = serde_json::to_string(&expr).expect("serialize");
-        let back: MetricExpr = serde_json::from_str(&json).expect("deserialize");
+        let back: Expr = serde_json::from_str(&json).expect("deserialize");
         assert_eq!(expr, back);
     }
 
     #[test]
     fn metric_at_roundtrips_with_real_tuple() {
-        let expr = MetricExpr::At {
-            of: Box::new(MetricExpr::Ref { name: n("Revenue") }),
+        let expr = Expr::At {
+            of: Box::new(Expr::Ref { name: n("Revenue") }),
             at: Tuple::single(MemberRef::new(
                 n("Scenario"),
                 n("Default"),
@@ -189,29 +189,29 @@ mod tests {
             )),
         };
         let json = serde_json::to_string(&expr).expect("serialize");
-        let back: MetricExpr = serde_json::from_str(&json).expect("deserialize");
+        let back: Expr = serde_json::from_str(&json).expect("deserialize");
         assert_eq!(expr, back);
     }
 
     #[test]
     fn metric_at_with_empty_tuple_roundtrips() {
-        let expr = MetricExpr::At {
-            of: Box::new(MetricExpr::Ref { name: n("Revenue") }),
+        let expr = Expr::At {
+            of: Box::new(Expr::Ref { name: n("Revenue") }),
             at: Tuple::empty(),
         };
         let json = serde_json::to_string(&expr).expect("serialize");
-        let back: MetricExpr = serde_json::from_str(&json).expect("deserialize");
+        let back: Expr = serde_json::from_str(&json).expect("deserialize");
         assert_eq!(expr, back);
     }
 
     #[test]
     fn metric_periods_to_date_roundtrips() {
-        let expr = MetricExpr::PeriodsToDate {
-            of: Box::new(MetricExpr::Ref { name: n("Revenue") }),
+        let expr = Expr::PeriodsToDate {
+            of: Box::new(Expr::Ref { name: n("Revenue") }),
             level: n("Year"),
         };
         let json = serde_json::to_string(&expr).expect("serialize");
-        let back: MetricExpr = serde_json::from_str(&json).expect("deserialize");
+        let back: Expr = serde_json::from_str(&json).expect("deserialize");
         assert_eq!(expr, back);
     }
 
@@ -219,17 +219,17 @@ mod tests {
     fn metric_with_unit_and_format_roundtrips() {
         let m = Metric::new(
             n("Occupancy"),
-            MetricExpr::Binary {
+            Expr::Binary {
                 bin_op: BinOp::Div,
-                l: Box::new(MetricExpr::Ref {
+                l: Box::new(Expr::Ref {
                     name: n("room_nights_sold"),
                 }),
-                r: Box::new(MetricExpr::Ref {
+                r: Box::new(Expr::Ref {
                     name: n("rooms_available"),
                 }),
             },
         )
-        .with_format(Format::parse("0.0%").expect("valid"));
+        .with_format(Format::from("0.0%"));
         let json = serde_json::to_string(&m).expect("serialize");
         let back: Metric = serde_json::from_str(&json).expect("deserialize");
         assert_eq!(m, back);

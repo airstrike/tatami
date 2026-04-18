@@ -12,7 +12,7 @@
 //!   [`schema::Measure`], [`schema::Metric`], [`schema::NamedSet`] and their
 //!   components.
 //! - Query types: [`Query`], [`Axes`], [`Tuple`], [`Path`], [`Set`],
-//!   [`MemberRef`], [`Predicate`], [`QueryOptions`].
+//!   [`MemberRef`], [`Predicate`], [`query::Options`].
 //! - A typestate [`Schema::builder`] that makes partial schemas fail to
 //!   compile.
 //!
@@ -33,10 +33,14 @@ pub mod query;
 pub mod results;
 pub mod schema;
 
-pub use query::{
-    Axes, Direction, MemberRef, OrderBy, Path, Predicate, Query, QueryOptions, Set, Tuple,
-};
+pub use query::{Axes, Direction, MemberRef, OrderBy, Path, Predicate, Query, Set, Tuple};
 pub use schema::Schema;
+
+// `Expr` at crate root — it's the formula-tree constructor, used often in
+// metric declarations, and doesn't clash with anything else in the crate.
+// `dimension`, `metric`, `query` stay module-qualified at call sites —
+// their narrower types (Kind, BinOp, Options, etc.) carry module context.
+pub use schema::metric::Expr;
 
 pub use cube::{Cube, MemberRelation};
 pub use results::cell::missing;

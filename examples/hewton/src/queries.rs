@@ -2,8 +2,9 @@
 //! each variant carries its own [`Query`], heading, and subtitle so the
 //! list of examples and the list of labels can't drift out of sync.
 
+use tatami::query::{self, Set, Tuple};
 use tatami::schema::Name;
-use tatami::{Axes, MemberRef, Path, Query, QueryOptions, Set, Tuple};
+use tatami::{Axes, MemberRef, Path, Query};
 
 /// Closed set of example queries Hewton demonstrates.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -65,7 +66,7 @@ fn scalar_kpi() -> Query {
         ])
         .expect("distinct dims"),
         metrics: vec![n("Revenue"), n("RevenueMoM")],
-        options: QueryOptions::default(),
+        options: query::Options::default(),
     }
 }
 
@@ -88,9 +89,9 @@ fn pivot_by_region() -> Query {
         },
         slicer: Tuple::of([MemberRef::scenario(n("Actual"))]).expect("distinct dims"),
         metrics: vec![n("Revenue")],
-        options: QueryOptions {
+        options: query::Options {
             non_empty: true,
-            ..QueryOptions::default()
+            ..query::Options::default()
         },
     }
 }
@@ -109,7 +110,7 @@ fn variance_pivot() -> Query {
         },
         slicer: Tuple::of([MemberRef::time(n("FY2026"))]).expect("distinct dims"),
         metrics: vec![n("Revenue"), n("ADR"), n("Occupancy")],
-        options: QueryOptions::default(),
+        options: query::Options::default(),
     }
 }
 
@@ -129,7 +130,7 @@ fn rollup_by_territory() -> Query {
         ])
         .expect("distinct dims"),
         metrics: vec![n("room_nights_sold")],
-        options: QueryOptions::default(),
+        options: query::Options::default(),
     }
 }
 

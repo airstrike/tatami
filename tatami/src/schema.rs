@@ -18,11 +18,11 @@ pub mod unit;
 use serde::{Deserialize, Serialize};
 
 pub use builder::Builder;
-pub use dimension::{Calendar, DimKind, Dimension, Hierarchy, Level};
+pub use dimension::{Calendar, Dimension, Hierarchy, Level};
 pub use error::Error;
 pub use format::Format;
 pub use measure::{Aggregation, Measure, SemiAgg};
-pub use metric::{BinOp, Metric, MetricExpr};
+pub use metric::{BinOp, Metric};
 pub use month_day::{Month, MonthDay};
 pub use name::Name;
 pub use named_set::NamedSet;
@@ -31,7 +31,7 @@ pub use unit::Unit;
 /// Top-level schema — the declarative description of a cube.
 ///
 /// Construct via [`Schema::builder`]. Name uniqueness within each collection
-/// and `MetricExpr::Ref` resolution are checked once at `.build()` time.
+/// and `metric::Expr::Ref` resolution are checked once at `.build()` time.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Schema {
     /// Declared dimensions of the cube.
@@ -91,7 +91,7 @@ mod tests {
             ))
             .metric(Metric::new(
                 n("Revenue"),
-                MetricExpr::Ref { name: n("amount") },
+                metric::Expr::Ref { name: n("amount") },
             ))
             .build()
             .expect("valid schema")
@@ -147,7 +147,7 @@ mod tests {
             .measure(Measure::new(n("amount"), Aggregation::sum()))
             .metric(Metric::new(
                 n("Nope"),
-                MetricExpr::Ref {
+                metric::Expr::Ref {
                     name: n("NonExistent"),
                 },
             ))
@@ -164,10 +164,10 @@ mod tests {
             .measure(Measure::new(n("cogs"), Aggregation::sum()))
             .metric(Metric::new(
                 n("GrossMargin"),
-                MetricExpr::Binary {
+                metric::Expr::Binary {
                     bin_op: BinOp::Sub,
-                    l: Box::new(MetricExpr::Ref { name: n("amount") }),
-                    r: Box::new(MetricExpr::Ref { name: n("cogs") }),
+                    l: Box::new(metric::Expr::Ref { name: n("amount") }),
+                    r: Box::new(metric::Expr::Ref { name: n("cogs") }),
                 },
             ))
             .build()

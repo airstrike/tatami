@@ -3,9 +3,10 @@
 //! Serves as the realistic example of `Schema::builder()` usage. Every
 //! helper call here is part of the tatami public API contract.
 
+use tatami::Expr;
 use tatami::schema::{
-    self, Aggregation, BinOp, Calendar, Dimension, Hierarchy, Level, Measure, Metric, MetricExpr,
-    Name, Schema, Unit,
+    self, Aggregation, BinOp, Calendar, Dimension, Hierarchy, Level, Measure, Metric, Name, Schema,
+    Unit,
 };
 
 pub fn hewton_schema() -> Result<Schema, schema::Error> {
@@ -86,7 +87,7 @@ fn rooms_available() -> Measure {
 // ── Metrics ────────────────────────────────────────────────────────────────
 
 fn revenue() -> Metric {
-    Metric::new(n("Revenue"), MetricExpr::Ref { name: n("amount") })
+    Metric::new(n("Revenue"), Expr::Ref { name: n("amount") })
         .with_unit(Unit::parse("USD").expect("usd"))
 }
 
@@ -133,28 +134,28 @@ fn revenue_mom() -> Metric {
 
 // ── Local helpers — keep call sites readable ───────────────────────────────
 
-fn ref_(name: &str) -> MetricExpr {
-    MetricExpr::Ref { name: n(name) }
+fn ref_(name: &str) -> Expr {
+    Expr::Ref { name: n(name) }
 }
 
-fn div(l: MetricExpr, r: MetricExpr) -> MetricExpr {
-    MetricExpr::Binary {
+fn div(l: Expr, r: Expr) -> Expr {
+    Expr::Binary {
         bin_op: BinOp::Div,
         l: Box::new(l),
         r: Box::new(r),
     }
 }
 
-fn sub(l: MetricExpr, r: MetricExpr) -> MetricExpr {
-    MetricExpr::Binary {
+fn sub(l: Expr, r: Expr) -> Expr {
+    Expr::Binary {
         bin_op: BinOp::Sub,
         l: Box::new(l),
         r: Box::new(r),
     }
 }
 
-fn lag(of: MetricExpr, dim: &str, n_periods: i32) -> MetricExpr {
-    MetricExpr::Lag {
+fn lag(of: Expr, dim: &str, n_periods: i32) -> Expr {
+    Expr::Lag {
         of: Box::new(of),
         dim: n(dim),
         n: n_periods,
