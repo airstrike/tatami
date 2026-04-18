@@ -13,9 +13,13 @@ use tatami::{Cell, Results, Tuple, pivot, rollup, scalar, series};
 use crate::theme;
 use crate::{Message, QueryState};
 
+// Inter at bold weight — matches the application's default_font family so
+// headings stay in the same typeface as body text, one step heavier.
 const BOLD: Font = Font {
+    family: font::Family::Name("Inter"),
     weight: font::Weight::Bold,
-    ..Font::DEFAULT
+    stretch: font::Stretch::Normal,
+    style: font::Style::Normal,
 };
 
 /// One rendered card — heading, subtitle, and a body keyed off the query's

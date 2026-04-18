@@ -19,3 +19,10 @@ tatami-inmem = { workspace = true }
 iced        = { workspace = true }
 polars-core = { workspace = true }
 tokio       = { workspace = true }
+
+# Hewton-only. polars-io is only here because the example loads facts from
+# a CSV on disk; the core tatami/tatami-inmem crates don't parse CSV.
+polars-io = { version = "0.51", default-features = false, features = ["csv"] }
+
+# airstrike/fount for Google Fonts loading (Inter). Also hewton-only.
+fount = { git = "https://github.com/airstrike/fount.git" }

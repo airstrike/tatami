@@ -34,7 +34,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use iced::widget::{column, scrollable};
-use iced::{Element, Task, Theme};
+use iced::{Element, Font, Task, Theme, font};
 
 use tatami::{Cube, Results};
 use tatami_inmem::InMemoryCube;
@@ -47,9 +47,20 @@ mod widgets;
 
 use queries::ExampleQuery;
 
+/// Primary UI typeface — Inter. Loaded from Google Fonts at startup via
+/// `fount`; until the network call resolves, iced falls back to its
+/// platform default sans-serif.
+pub const INTER: Font = Font {
+    family: font::Family::Name("Inter"),
+    weight: font::Weight::Normal,
+    stretch: font::Stretch::Normal,
+    style: font::Style::Normal,
+};
+
 fn main() -> iced::Result {
     iced::application(App::new, App::update, App::view)
         .theme(|_: &App| Theme::Light)
+        .default_font(INTER)
         .window_size((1200.0, 800.0))
         .title("Hewton — tatami v0.1 worked example")
         .run()
@@ -80,6 +91,11 @@ enum QueryState {
 enum Message {
     /// A named query completed — success or failure.
     QueryDone(ExampleQuery, Result<Results, String>),
+    /// A Google Fonts family finished downloading + registering with iced.
+    /// The second payload is `Err(reason)` on download/parse failure; iced
+    /// falls back to the platform default silently, so this is logged but
+    /// not surfaced to the view.
+    FontLoaded(&'static str, Result<(), String>),
 }
 
 // ── new / update / view ────────────────────────────────────────────────────
@@ -101,7 +117,7 @@ impl App {
         // Kick off each example query concurrently. Each returns a Task
         // that resolves to a `QueryDone` message keyed by `ExampleQuery`.
         let mut results = HashMap::with_capacity(ExampleQuery::ALL.len());
-        let tasks: Vec<Task<Message>> = ExampleQuery::ALL
+        let query_tasks: Vec<Task<Message>> = ExampleQuery::ALL
             .into_iter()
             .map(|eq| {
                 results.insert(eq, QueryState::Running);
@@ -109,7 +125,16 @@ impl App {
             })
             .collect();
 
-        (Self { cube, results }, Task::batch(tasks))
+        // Load Inter from Google Fonts. Until it resolves, text renders in
+        // the platform default. No blocking on this — font arrival triggers
+        // a natural re-layout.
+        let init = Task::batch(
+            std::iter::once(load_family("Inter"))
+                .chain(query_tasks)
+                .collect::<Vec<_>>(),
+        );
+
+        (Self { cube, results }, init)
     }
 
     fn update(&mut self, message: Message) -> Task<Message> {
@@ -119,6 +144,14 @@ impl App {
             }
             Message::QueryDone(eq, Err(error)) => {
                 self.results.insert(eq, QueryState::Err(error));
+            }
+            Message::FontLoaded(_name, Ok(())) => {
+                // iced re-lays out on next frame; nothing to do here.
+            }
+            Message::FontLoaded(name, Err(error)) => {
+                // Silent fall-through to the platform default is fine —
+                // log for local debugging and keep going.
+                eprintln!("font load failed: {name} — {error}");
             }
         }
         Task::none()
@@ -152,5 +185,31 @@ fn spawn(cube: Arc<InMemoryCube>, eq: ExampleQuery) -> Task<Message> {
     Task::future(async move {
         let outcome = cube.query(&query).await.map_err(|e| e.to_string());
         Message::QueryDone(eq, outcome)
+    })
+}
+
+// ── Font loading ───────────────────────────────────────────────────────────
+
+/// Fetch a Google Fonts family via `fount`, then register every variant's
+/// bytes with iced. Folds every outcome into a single `FontLoaded` Message
+/// — the first failure wins, success is an empty Ok.
+fn load_family(name: &'static str) -> Task<Message> {
+    Task::future(async move { fount::google::load(name, None).await }).then(move |result| {
+        match result {
+            Ok(variants) => {
+                let register = variants.into_iter().map(|bytes| {
+                    iced::font::load(bytes).map(move |r: Result<(), iced::font::Error>| {
+                        r.map_err(|e| format!("{e:?}"))
+                    })
+                });
+                Task::batch(register)
+                    .collect()
+                    .map(move |results: Vec<Result<(), String>>| {
+                        let combined = results.into_iter().find(Result::is_err).unwrap_or(Ok(()));
+                        Message::FontLoaded(name, combined)
+                    })
+            }
+            Err(error) => Task::done(Message::FontLoaded(name, Err(format!("{error:?}")))),
+        }
     })
 }

@@ -44,3 +44,10 @@ opt-level = 1
 
 [profile.dev.package."*"]
 opt-level = 3
+
+# iced 0.15-dev ships from git, not crates.io — transitive deps that
+# spec `iced_core = "0.15.0-dev"` (fount, hyozu eventually) need to
+# resolve via the same source. Pin here so cargo doesn't go looking on
+# crates.io.
+[patch.crates-io]
+iced_core = { git = "https://github.com/iced-rs/iced", branch = "master" }
