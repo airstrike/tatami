@@ -1,4 +1,4 @@
-//! Schema types — dimensions, measures, metrics.
+//! Schema types — dimensions, measures, metrics, named sets.
 //!
 //! Every public enum here is `#[non_exhaustive]`; every serializable type
 //! roundtrips JSON via serde. See [`Schema::builder`] for typestate
@@ -22,21 +22,16 @@ pub use dimension::{Calendar, DimKind, Dimension, Hierarchy, Level};
 pub use error::Error;
 pub use format::Format;
 pub use measure::{Aggregation, Measure, SemiAgg};
-pub use metric::{AtPlaceholder, BinOp, Metric, MetricExpr};
+pub use metric::{BinOp, Metric, MetricExpr};
 pub use month_day::{Month, MonthDay};
 pub use name::Name;
+pub use named_set::NamedSet;
 pub use unit::Unit;
 
 /// Top-level schema — the declarative description of a cube.
 ///
 /// Construct via [`Schema::builder`]. Name uniqueness within each collection
 /// and `MetricExpr::Ref` resolution are checked once at `.build()` time.
-///
-/// # Phase 1 note
-///
-/// `named_sets` is deferred to Phase 2 because `NamedSet` needs the `Set`
-/// algebra from `query::set`. The field will be added without breaking
-/// existing JSON payloads (serde-default on deserialize).
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Schema {
     /// Declared dimensions of the cube.
@@ -45,6 +40,11 @@ pub struct Schema {
     pub measures: Vec<Measure>,
     /// Declared metrics (named formulas over measures / metrics).
     pub metrics: Vec<Metric>,
+    /// Declared named sets — reusable `Set` expressions referenceable via
+    /// [`crate::query::Set::Named`]. Defaults to empty for back-compat
+    /// with Phase 1 JSON payloads that predate this field.
+    #[serde(default)]
+    pub named_sets: Vec<NamedSet>,
 }
 
 impl Schema {
@@ -103,6 +103,19 @@ mod tests {
         let s = serde_json::to_string_pretty(&schema).expect("serialize");
         let back: Schema = serde_json::from_str(&s).expect("deserialize");
         assert_eq!(schema, back);
+    }
+
+    #[test]
+    fn schema_deserializes_without_named_sets_field() {
+        // Legacy JSON that predates the `named_sets` field. Should still
+        // deserialize, yielding an empty named-sets list.
+        let json = r#"{
+            "dimensions": [{"name":"Geography","hierarchies":[],"kind":{"kind":"regular"}}],
+            "measures":   [{"name":"amount","aggregation":{"kind":"sum"},"unit":null}],
+            "metrics":    []
+        }"#;
+        let schema: Schema = serde_json::from_str(json).expect("deserialize");
+        assert!(schema.named_sets.is_empty());
     }
 
     #[test]

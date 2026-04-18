@@ -30,7 +30,7 @@
 use std::collections::HashSet;
 use std::marker::PhantomData;
 
-use crate::schema::{Dimension, Error, Measure, Metric, MetricExpr, Name, Schema};
+use crate::schema::{Dimension, Error, Measure, Metric, MetricExpr, Name, NamedSet, Schema};
 
 /// Typestate marker: no dimensions added yet.
 #[derive(Debug)]
@@ -60,6 +60,7 @@ pub struct Builder<Dims, Measures> {
     dimensions: Vec<Dimension>,
     measures: Vec<Measure>,
     metrics: Vec<Metric>,
+    named_sets: Vec<NamedSet>,
     _state: PhantomData<(Dims, Measures)>,
 }
 
@@ -71,6 +72,7 @@ impl Builder<NoDims, NoMeasures> {
             dimensions: Vec::new(),
             measures: Vec::new(),
             metrics: Vec::new(),
+            named_sets: Vec::new(),
             _state: PhantomData,
         }
     }
@@ -87,6 +89,7 @@ impl Builder<NoDims, NoMeasures> {
             mut dimensions,
             measures,
             metrics,
+            named_sets,
             _state,
         } = self;
         dimensions.push(dimension);
@@ -94,6 +97,7 @@ impl Builder<NoDims, NoMeasures> {
             dimensions,
             measures,
             metrics,
+            named_sets,
             _state: PhantomData,
         }
     }
@@ -116,6 +120,7 @@ impl Builder<HasDims, NoMeasures> {
             dimensions,
             mut measures,
             metrics,
+            named_sets,
             _state,
         } = self;
         measures.push(measure);
@@ -123,6 +128,7 @@ impl Builder<HasDims, NoMeasures> {
             dimensions,
             measures,
             metrics,
+            named_sets,
             _state: PhantomData,
         }
     }
@@ -152,13 +158,23 @@ impl Builder<HasDims, HasMeasures> {
         self
     }
 
+    /// Append a named set. Available only in the terminal state — named
+    /// sets live in the same reference namespace as measures and metrics.
+    #[must_use]
+    pub fn named_set(mut self, named_set: NamedSet) -> Self {
+        self.named_sets.push(named_set);
+        self
+    }
+
     /// Validate and produce the [`crate::Schema`].
     ///
     /// Checks:
     /// - Dimension names are unique.
     /// - Measure names are unique.
     /// - Metric names are unique.
-    /// - No name is shared between a measure and a metric.
+    /// - Named set names are unique.
+    /// - No name is shared between a measure / metric / named set
+    ///   (they share one reference namespace).
     /// - Every `MetricExpr::Ref { name }` resolves to a declared measure or
     ///   metric.
     ///
@@ -168,6 +184,7 @@ impl Builder<HasDims, HasMeasures> {
             dimensions,
             measures,
             metrics,
+            named_sets,
             ..
         } = self;
 
@@ -190,13 +207,24 @@ impl Builder<HasDims, HasMeasures> {
                 return Err(Error::DuplicateMetricName(m.name.clone()));
             }
         }
+        let mut named_set_names: HashSet<&Name> = HashSet::new();
+        for ns in &named_sets {
+            if !named_set_names.insert(&ns.name) {
+                return Err(Error::DuplicateNamedSetName(ns.name.clone()));
+            }
+        }
 
-        // Measures and metrics share the same reference namespace — bare
-        // `Ref { name }` resolves against the union, so collisions are
-        // ambiguous.
+        // Measures, metrics, and named sets share one reference namespace —
+        // a bare `Ref { name }` or `Set::Named { name }` resolves against the
+        // union, so collisions would be ambiguous.
         for m in &metrics {
             if measure_names.contains(&m.name) {
                 return Err(Error::MeasureMetricNameCollision(m.name.clone()));
+            }
+        }
+        for ns in &named_sets {
+            if measure_names.contains(&ns.name) || metric_names.contains(&ns.name) {
+                return Err(Error::NamedSetNameCollision(ns.name.clone()));
             }
         }
 
@@ -214,6 +242,7 @@ impl Builder<HasDims, HasMeasures> {
             dimensions,
             measures,
             metrics,
+            named_sets,
         })
     }
 }
@@ -244,6 +273,7 @@ fn check_refs(metric: &Name, expr: &MetricExpr, known: &HashSet<&Name>) -> Resul
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::query::{MemberRef, Path, Set};
     use crate::schema::{Aggregation, BinOp, Dimension};
 
     fn n(s: &str) -> Name {
@@ -264,6 +294,7 @@ mod tests {
         assert_eq!(schema.dimensions.len(), 1);
         assert_eq!(schema.measures.len(), 1);
         assert_eq!(schema.metrics.len(), 1);
+        assert!(schema.named_sets.is_empty());
     }
 
     #[test]
@@ -333,5 +364,57 @@ mod tests {
             .build()
             .expect_err("unresolved ref");
         assert!(matches!(err, Error::UnresolvedMetricRef { .. }));
+    }
+
+    #[test]
+    fn builder_accepts_named_set() {
+        let schema = Schema::builder()
+            .dimension(Dimension::regular(n("Geography")))
+            .measure(Measure::new(n("amount"), Aggregation::sum()))
+            .named_set(NamedSet::new(
+                n("TopRegions"),
+                Set::Children {
+                    of: MemberRef::new(n("Geography"), n("Default"), Path::of(n("World"))),
+                },
+            ))
+            .build()
+            .expect("valid");
+        assert_eq!(schema.named_sets.len(), 1);
+    }
+
+    #[test]
+    fn builder_rejects_duplicate_named_set_names() {
+        let ns = || {
+            NamedSet::new(
+                n("TopRegions"),
+                Set::Children {
+                    of: MemberRef::new(n("Geography"), n("Default"), Path::of(n("World"))),
+                },
+            )
+        };
+        let err = Schema::builder()
+            .dimension(Dimension::regular(n("Geography")))
+            .measure(Measure::new(n("amount"), Aggregation::sum()))
+            .named_set(ns())
+            .named_set(ns())
+            .build()
+            .expect_err("duplicate named set");
+        assert!(matches!(err, Error::DuplicateNamedSetName(_)));
+    }
+
+    #[test]
+    fn builder_rejects_named_set_name_collision_with_measure() {
+        let err = Schema::builder()
+            .dimension(Dimension::regular(n("Geography")))
+            .measure(Measure::new(n("amount"), Aggregation::sum()))
+            .named_set(NamedSet::new(
+                n("amount"),
+                Set::Children {
+                    of: MemberRef::new(n("Geography"), n("Default"), Path::of(n("World"))),
+                },
+            ))
+            .build()
+            .expect_err("named set collides with measure");
+        assert!(matches!(err, Error::NamedSetNameCollision(_)));
     }
 }

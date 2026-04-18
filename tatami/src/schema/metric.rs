@@ -1,7 +1,8 @@
-//! [`Metric`], [`MetricExpr`], [`BinOp`], and the Phase-1 [`AtPlaceholder`].
+//! [`Metric`], [`MetricExpr`], [`BinOp`].
 
 use serde::{Deserialize, Serialize};
 
+use crate::query::Tuple;
 use crate::schema::{Format, Name, Unit};
 
 /// A named formula over measures and other metrics. Compare with
@@ -50,14 +51,6 @@ impl Metric {
 /// Internal-tag JSON so nested formulas read cleanly:
 /// `{"op": "binary", "bin_op": "div", "l": {…}, "r": {…}}`. Struct variants
 /// only — internal tagging requires it.
-///
-/// # Phase 1 placeholder
-///
-/// The [`MetricExpr::At`] variant currently carries [`AtPlaceholder`]
-/// (empty `{}` on the wire) because `Tuple` lives in `query::tuple` (Phase
-/// 2). Phase 2 will replace [`AtPlaceholder`] with the real `Tuple`; the
-/// JSON shape of the `At` variant will change at that point. This is
-/// flagged as a deviation in the Phase 1 report.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "op", rename_all = "snake_case")]
 #[non_exhaustive]
@@ -99,16 +92,12 @@ pub enum MetricExpr {
         /// The level whose current period defines the window.
         level: Name,
     },
-    /// Pin a coordinate — evaluate `of` at the tuple `at`. In Phase 1 `at`
-    /// is the empty [`AtPlaceholder`]; Phase 2 will swap it for the real
-    /// `Tuple` type. Until then `At` serialises as `{"op":"at","of":…,
-    /// "at":{}}`.
+    /// Pin a coordinate — evaluate `of` at the tuple `at`.
     At {
         /// Sub-expression to evaluate at the fixed coordinate.
         of: Box<MetricExpr>,
-        // TODO(phase-2): replace with real `query::tuple::Tuple`.
-        /// Placeholder coordinate (always empty in Phase 1).
-        at: AtPlaceholder,
+        /// The coordinate to pin.
+        at: Tuple,
     },
 }
 
@@ -127,21 +116,10 @@ pub enum BinOp {
     Div,
 }
 
-/// Phase-1 placeholder for `query::tuple::Tuple`.
-///
-/// This type exists only so [`MetricExpr::At`] can compile and serde-
-/// roundtrip before the query layer lands. Its JSON shape is an empty
-/// object `{}` — serde-compatible with a future `Tuple` that is initially
-/// empty. The type carries no data and cannot be constructed
-/// meaningfully; it is `Default` so deserialisation works and that's it.
-///
-/// TODO(phase-2): delete and replace with `crate::query::tuple::Tuple`.
-#[derive(Clone, Debug, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
-pub struct AtPlaceholder {}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::query::{MemberRef, Path};
 
     fn n(s: &str) -> Name {
         Name::parse(s).expect("valid")
@@ -201,10 +179,25 @@ mod tests {
     }
 
     #[test]
-    fn metric_at_placeholder_roundtrips() {
+    fn metric_at_roundtrips_with_real_tuple() {
         let expr = MetricExpr::At {
             of: Box::new(MetricExpr::Ref { name: n("Revenue") }),
-            at: AtPlaceholder::default(),
+            at: Tuple::single(MemberRef::new(
+                n("Scenario"),
+                n("Default"),
+                Path::of(n("Plan")),
+            )),
+        };
+        let json = serde_json::to_string(&expr).expect("serialize");
+        let back: MetricExpr = serde_json::from_str(&json).expect("deserialize");
+        assert_eq!(expr, back);
+    }
+
+    #[test]
+    fn metric_at_with_empty_tuple_roundtrips() {
+        let expr = MetricExpr::At {
+            of: Box::new(MetricExpr::Ref { name: n("Revenue") }),
+            at: Tuple::empty(),
         };
         let json = serde_json::to_string(&expr).expect("serialize");
         let back: MetricExpr = serde_json::from_str(&json).expect("deserialize");

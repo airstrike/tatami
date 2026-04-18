@@ -16,10 +16,17 @@ pub enum Error {
     /// Two or more metrics shared a name.
     #[error("duplicate metric name: {0}")]
     DuplicateMetricName(Name),
+    /// Two or more named sets shared a name.
+    #[error("duplicate named set name: {0}")]
+    DuplicateNamedSetName(Name),
     /// A measure and a metric shared a name (would make a bare `Ref`
     /// ambiguous at resolve time).
     #[error("name {0} is used by both a measure and a metric")]
     MeasureMetricNameCollision(Name),
+    /// A named set shared a name with a measure or metric (all three live
+    /// in the same reference namespace).
+    #[error("named set {0} collides with a measure or metric of the same name")]
+    NamedSetNameCollision(Name),
     /// A `MetricExpr::Ref { name }` did not resolve to any measure or
     /// metric.
     #[error("metric {metric} references unknown name {referenced}")]
