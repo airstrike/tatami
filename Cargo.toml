@@ -1,3 +1,46 @@
 [workspace]
-members = ["tatami"]
+members  = ["tatami", "tatami-inmem", "examples/hewton"]
 resolver = "3"
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+license = "MIT OR Apache-2.0"
+publish = false
+
+[workspace.lints.rust]
+missing_docs = "warn"
+
+[workspace.dependencies]
+# Intra-workspace crates — every member that consumes another tatami crate
+# goes through these, not path-relative specs.
+tatami       = { path = "tatami" }
+tatami-inmem = { path = "tatami-inmem" }
+
+# Baseline per MAP §9 — additions to this list need a justification comment.
+serde      = { version = "1",    features = ["derive"] }
+serde_json = "1"
+thiserror  = "2"
+jiff       = { version = "0.2",  features = ["serde"] }
+
+# tatami-inmem substrate. `polars-core` (the split crate, not the monolith)
+# is exactly what inboard stores in `Resource::DataFrame(polars_core::DataFrame)` —
+# version-pinned to inboard's 0.51 so the DataFrame type is interoperable.
+# Bump deliberately, in lockstep with inboard.
+polars-core = { version = "0.51", default-features = false, features = ["serde"] }
+
+# Async runtime for the reference impl and examples.
+tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
+
+# Example-only — iced 0.15-dev off upstream master. Pin a commit once the
+# surface stabilises; for now riding the branch.
+iced = { git = "https://github.com/iced-rs/iced", branch = "master", features = ["tokio"] }
+
+# Match inboard: build deps at high opt-level, own crate at low — fast
+# iteration, tolerable runtime. Tatami itself is cheap to compile so the
+# delta is mostly in the example.
+[profile.dev]
+opt-level = 1
+
+[profile.dev.package."*"]
+opt-level = 3

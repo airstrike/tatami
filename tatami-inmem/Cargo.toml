@@ -1,0 +1,18 @@
+[package]
+name        = "tatami-inmem"
+description = "Polars-backed reference implementation of the tatami Cube trait."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+tatami      = { workspace = true }
+polars-core = { workspace = true }
+thiserror   = { workspace = true }
+
+[dev-dependencies]
+tokio = { workspace = true }

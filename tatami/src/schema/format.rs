@@ -32,6 +32,18 @@ impl Format {
     }
 }
 
+impl From<&str> for Format {
+    /// Infallible construction — intended for **compile-time constants** like
+    /// `"0.0%"` where the format is known valid. Panics if the input is
+    /// empty / whitespace-only.
+    ///
+    /// For runtime / user-supplied input, use [`Format::parse`] which
+    /// returns `Result<Self, Error>`.
+    fn from(s: &str) -> Self {
+        Self::parse(s).expect("format string is valid (non-empty, non-whitespace)")
+    }
+}
+
 impl fmt::Display for Format {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str(&self.0)

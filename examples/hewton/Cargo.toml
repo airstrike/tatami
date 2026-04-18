@@ -1,0 +1,21 @@
+[package]
+name        = "hewton"
+description = "Worked hotel-sales cube — the TARGET API for tatami v0.1."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+# Exercises the Phase 3 `tatami::Cube` trait and the Phase 4
+# `tatami_inmem::InMemoryCube` scaffold (query/members return
+# `Error::NotImplemented` until Phase 5).
+[dependencies]
+tatami       = { workspace = true }
+tatami-inmem = { workspace = true }
+
+iced        = { workspace = true }
+polars-core = { workspace = true }
+tokio       = { workspace = true }
