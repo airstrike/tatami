@@ -419,6 +419,43 @@ pub enum Error {
         /// Offending upper endpoint.
         to: Path,
     },
+
+    // ── Phase 5e: tuple + aggregate evaluation ─────────────────────────
+    //
+    // The filter and aggregate primitives in `crate::eval::tuple` and
+    // `crate::eval::aggregate` run inside the polars runtime. Errors from
+    // that runtime are the one internal boundary where `Result` is
+    // appropriate inside the eval pipeline (MAP §0.5).
+    /// A polars filter call surfaced an error while materialising the
+    /// boolean mask for a [`crate::resolve::ResolvedTuple`].
+    #[error("tuple evaluation: polars filter failed: {reason}")]
+    EvalFilterFailed {
+        /// The polars error text.
+        reason: String,
+    },
+
+    /// A level-key or measure column disappeared between cube
+    /// construction and eval time. Phase 5a rules this out structurally,
+    /// so the variant is a defensive surfacing of "polars runtime
+    /// invariant violation" rather than a user-reachable error — the
+    /// §0.5 "Result at the boundary" rule applies because the polars
+    /// runtime is the boundary.
+    #[error("eval: expected column {column} to exist at query time")]
+    EvalColumnMissing {
+        /// The missing column name (measure name or level key).
+        column: String,
+    },
+
+    /// An aggregation call against polars surfaced an error — a sum /
+    /// mean / min / max returned a non-numeric scalar, or the measure
+    /// column iteration hit a polars runtime failure.
+    #[error("aggregate evaluation: measure {measure}: {reason}")]
+    EvalAggregateFailed {
+        /// The measure whose aggregation failed.
+        measure: Name,
+        /// The polars error text (or internal reason string).
+        reason: String,
+    },
 }
 
 // ── Validation ─────────────────────────────────────────────────────────────

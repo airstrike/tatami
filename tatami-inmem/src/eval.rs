@@ -11,8 +11,19 @@
 //! - [`set`] (Phase 5d) turns a `ResolvedSet` into a `Vec<ResolvedTuple>`
 //!   by walking the member catalogue. `Filter` and `TopN` are stubbed out
 //!   with typed errors until Phase 5g wires the metric evaluator through.
+//! - [`tuple`] (Phase 5e) filters a fact [`DataFrame`] by a resolved tuple
+//!   — the fact-touching primitive that aggregation builds on.
+//! - [`aggregate`] (Phase 5e) evaluates a single [`Measure`] at a
+//!   [`ResolvedTuple`] context, including the semi-additive rollup rule
+//!   that guards against silent wrong answers (MAP §8 R3).
 //!
-//! Phase 5e (tuple evaluation), 5f (metric evaluation), and 5g (query
-//! execution) land as additional submodules here.
+//! Phase 5f (metric tree eval) and 5g (query execution) land as additional
+//! submodules here.
+//!
+//! [`DataFrame`]: polars_core::prelude::DataFrame
+//! [`Measure`]: tatami::schema::Measure
+//! [`ResolvedTuple`]: crate::resolve::ResolvedTuple
 
+pub(crate) mod aggregate;
 pub(crate) mod set;
+pub(crate) mod tuple;
