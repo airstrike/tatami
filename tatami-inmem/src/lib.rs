@@ -1,26 +1,34 @@
 //! Polars-backed reference implementation of [`tatami::Cube`].
 //!
 //! v0.1 scaffold — Phase 5 of MAP_PLAN.md fills in real evaluation. Phase 5a
-//! adds structural validation at [`InMemoryCube::new`] time: every measure
+//! added structural validation at [`InMemoryCube::new`] time: every measure
 //! and every dimension-level key must have a column of a sensible dtype in
-//! the fact [`DataFrame`]. [`InMemoryCube::query`] and
-//! [`InMemoryCube::members`] still short-circuit with
-//! [`Error::NotImplemented`] until Phase 5c–g land.
+//! the fact [`DataFrame`]. Phase 5b (this file + [`catalogue`]) builds a
+//! per-hierarchy member tree once at construction time and answers
+//! [`InMemoryCube::members`] from it. [`InMemoryCube::query`] still
+//! short-circuits with [`Error::NotImplemented`] until Phase 5c–g land.
+
+mod catalogue;
 
 use polars_core::prelude::{Column, DataFrame, DataType};
+use tatami::query::Path;
 use tatami::schema::{Aggregation, Dimension, Measure, Name, Schema};
 use tatami::{Cube, MemberRef, MemberRelation, Query, Results};
+
+use crate::catalogue::Catalogue;
 
 /// In-memory cube backed by a Polars [`DataFrame`].
 ///
 /// Construct via [`InMemoryCube::new`], which validates that the fact frame's
-/// columns match the schema's measures and dimension levels (see Phase 5a of
-/// MAP_PLAN.md §5). Evaluation lands in Phase 5c–g; today
-/// [`InMemoryCube::query`] and [`InMemoryCube::members`] return
+/// columns match the schema's measures and dimension levels (Phase 5a of
+/// MAP_PLAN.md §5) and then builds a member catalogue used by
+/// [`InMemoryCube::members`] (Phase 5b). Query evaluation lands in
+/// Phase 5c–g; [`InMemoryCube::query`] still returns
 /// [`Error::NotImplemented`].
 #[derive(Debug)]
 pub struct InMemoryCube {
     schema: Schema,
+    catalogue: Catalogue,
     // Prefixed with `_` to silence dead-code warnings until Phase 5c–g wires
     // the fact frame into evaluation. Renamed to `df` at that point.
     _df: DataFrame,
@@ -36,12 +44,30 @@ impl InMemoryCube {
     /// [`Error::MeasureDtypeMismatch`], or [`Error::LevelDtypeMismatch`] on
     /// the first violation found.
     ///
+    /// After validation, scans `df` once per `(dim, hierarchy)` pair to build
+    /// the per-hierarchy member tree used by [`InMemoryCube::members`].
+    /// Surfaces [`Error::MalformedMemberValue`] if any non-null level cell
+    /// fails [`Name::parse`].
+    ///
     /// Semantic checks that depend on the resolved query pipeline — metric
     /// ref resolution, `Lag` dim-kind, `PeriodsToDate` level membership —
     /// are deferred to Phase 5c.
     pub fn new(df: DataFrame, schema: Schema) -> Result<Self, Error> {
         validate(&df, &schema)?;
-        Ok(Self { schema, _df: df })
+        let catalogue = Catalogue::build(&df, &schema)?;
+        Ok(Self {
+            schema,
+            catalogue,
+            _df: df,
+        })
+    }
+
+    /// Crate-internal accessor for the member catalogue. Phase 5d's
+    /// `Set::Members` evaluation consumes this directly; the `allow` clears
+    /// the dead-code warning until that wiring lands.
+    #[allow(dead_code)]
+    pub(crate) fn catalogue(&self) -> &Catalogue {
+        &self.catalogue
     }
 }
 
@@ -58,12 +84,12 @@ impl Cube for InMemoryCube {
 
     async fn members(
         &self,
-        _dim: &Name,
-        _hierarchy: &Name,
-        _at: &MemberRef,
-        _relation: MemberRelation,
+        dim: &Name,
+        hierarchy: &Name,
+        at: &MemberRef,
+        relation: MemberRelation,
     ) -> Result<Vec<MemberRef>, Self::Error> {
-        Err(Error::NotImplemented)
+        self.catalogue.members(dim, hierarchy, at, relation)
     }
 }
 
@@ -133,6 +159,66 @@ pub enum Error {
         /// Stringified fact-frame dtype (human-readable).
         dtype: String,
     },
+
+    /// A non-null cell in a level-key column could not be parsed as a
+    /// [`Name`] (e.g., empty string after a cast, or a value with leading
+    /// whitespace).
+    ///
+    /// Surfaced at [`InMemoryCube::new`] time — the catalogue build is
+    /// fail-fast so callers see bad data up front, not on the first query.
+    #[error("dimension {dim}, level {level}: cell value {value:?} is not a valid member name")]
+    MalformedMemberValue {
+        /// Dimension name.
+        dim: Name,
+        /// Level name within the dimension.
+        level: Name,
+        /// The raw cell value, as stringified from the fact frame.
+        value: String,
+    },
+
+    /// `members()` was called for a `(dim, hierarchy)` pair that is not in
+    /// the schema's catalogue.
+    #[error("dimension {dim} has no hierarchy named {hierarchy}")]
+    UnknownHierarchy {
+        /// Dimension name.
+        dim: Name,
+        /// Hierarchy name that was not found.
+        hierarchy: Name,
+    },
+
+    /// The `at` [`MemberRef`] passed to `members()` refers to a different
+    /// `(dim, hierarchy)` than the pair the call is asking about.
+    #[error(
+        "member reference points at ({actual_dim}, {actual_hierarchy}) but members() was called for ({expected_dim}, {expected_hierarchy})"
+    )]
+    MemberRefHierarchyMismatch {
+        /// Dimension the call was made against.
+        expected_dim: Name,
+        /// Hierarchy the call was made against.
+        expected_hierarchy: Name,
+        /// Dimension carried by the `at` [`MemberRef`].
+        actual_dim: Name,
+        /// Hierarchy carried by the `at` [`MemberRef`].
+        actual_hierarchy: Name,
+    },
+
+    /// The `at` path does not exist in the catalogue — some segment along
+    /// the path has no matching member.
+    #[error("dimension {dim}, hierarchy {hierarchy}: no member at path {path}")]
+    UnknownMember {
+        /// Dimension name.
+        dim: Name,
+        /// Hierarchy name.
+        hierarchy: Name,
+        /// Requested path.
+        path: Path,
+    },
+
+    /// A [`MemberRelation`] variant this backend has not yet learnt to
+    /// handle — `MemberRelation` is `#[non_exhaustive]`, so forward
+    /// compatibility requires a fallible case rather than a panic.
+    #[error("unsupported member relation: {0:?}")]
+    UnsupportedRelation(MemberRelation),
 }
 
 // ── Validation ─────────────────────────────────────────────────────────────
@@ -491,5 +577,382 @@ mod tests {
             err,
             Error::MeasureDtypeMismatch { aggregation, .. } if aggregation == "SemiAdditive"
         ));
+    }
+
+    // ── Phase 5b: member catalogue + navigation ─────────────────────────
+
+    /// Two-level Geography schema: root `Region`, then `Country`.
+    /// Reused by several 5b tests that only need a single hierarchy.
+    fn geo_schema() -> Schema {
+        Schema::builder()
+            .dimension(
+                Dimension::regular(n("Geography")).hierarchy(
+                    Hierarchy::new(n("Default"))
+                        .level(Level::new(n("Region"), n("region")))
+                        .level(Level::new(n("Country"), n("country"))),
+                ),
+            )
+            .measure(Measure::new(n("amount"), Aggregation::sum()))
+            .build()
+            .expect("schema valid")
+    }
+
+    /// Three-level Geography schema: `World` → `Country` → `City`. Used by
+    /// the leaves / descendants-depth tests.
+    fn geo3_schema() -> Schema {
+        Schema::builder()
+            .dimension(
+                Dimension::regular(n("Geography")).hierarchy(
+                    Hierarchy::new(n("Default"))
+                        .level(Level::new(n("World"), n("world")))
+                        .level(Level::new(n("Country"), n("country")))
+                        .level(Level::new(n("City"), n("city"))),
+                ),
+            )
+            .measure(Measure::new(n("amount"), Aggregation::sum()))
+            .build()
+            .expect("schema valid")
+    }
+
+    fn world_ref(segments: Vec<Name>) -> MemberRef {
+        MemberRef::new(
+            n("Geography"),
+            n("Default"),
+            Path::parse(segments).expect("non-empty path"),
+        )
+    }
+
+    #[tokio::test]
+    async fn catalogue_discovers_distinct_members_per_hierarchy() {
+        let df = df! {
+            "region"  => ["World", "World", "World"],
+            "country" => ["US", "US", "UK"],
+            "amount"  => [1.0_f64, 2.0, 3.0],
+        }
+        .expect("frame valid");
+        let cube = InMemoryCube::new(df, geo_schema()).expect("construct cube");
+
+        let roots = cube
+            .members(
+                &n("Geography"),
+                &n("Default"),
+                &world_ref(vec![n("World")]),
+                MemberRelation::Parent,
+            )
+            .await
+            .expect("parent query");
+        assert!(roots.is_empty(), "root-level members have no parent");
+
+        let countries = cube
+            .members(
+                &n("Geography"),
+                &n("Default"),
+                &world_ref(vec![n("World")]),
+                MemberRelation::Children,
+            )
+            .await
+            .expect("children query");
+        let tails: Vec<&str> = countries
+            .iter()
+            .map(|m| m.path.tail().last().expect("has tail").as_str())
+            .collect();
+        assert_eq!(tails, vec!["UK", "US"], "BTreeMap-ordered children");
+    }
+
+    #[tokio::test]
+    async fn catalogue_skips_rows_with_null_level_values() {
+        // "country" has a null in the first row — that row must not produce a
+        // synthetic null child under "World".
+        let df = df! {
+            "region"  => [Some("World"),         Some("World"), Some("World")],
+            "country" => [None::<&str>,          Some("US"),    Some("UK")],
+            "amount"  => [1.0_f64,               2.0,           3.0],
+        }
+        .expect("frame valid");
+        let cube = InMemoryCube::new(df, geo_schema()).expect("construct cube");
+
+        let countries = cube
+            .members(
+                &n("Geography"),
+                &n("Default"),
+                &world_ref(vec![n("World")]),
+                MemberRelation::Children,
+            )
+            .await
+            .expect("children query");
+        let tails: Vec<&str> = countries
+            .iter()
+            .map(|m| m.path.tail().last().expect("has tail").as_str())
+            .collect();
+        assert_eq!(tails, vec!["UK", "US"]);
+    }
+
+    #[tokio::test]
+    async fn catalogue_deduplicates_rows() {
+        // Ten identical rows → one member per distinct path.
+        let df = df! {
+            "region"  => ["World"; 10],
+            "country" => ["US"; 10],
+            "amount"  => [1.0_f64; 10],
+        }
+        .expect("frame valid");
+        let cube = InMemoryCube::new(df, geo_schema()).expect("construct cube");
+
+        let countries = cube
+            .members(
+                &n("Geography"),
+                &n("Default"),
+                &world_ref(vec![n("World")]),
+                MemberRelation::Children,
+            )
+            .await
+            .expect("children query");
+        assert_eq!(countries.len(), 1);
+        assert_eq!(
+            countries[0].path.tail().last().expect("has tail").as_str(),
+            "US"
+        );
+    }
+
+    #[test]
+    fn new_rejects_malformed_member_value() {
+        // Empty string at a level-key cell fails `Name::parse`.
+        let df = df! {
+            "region"  => ["World", ""],
+            "country" => ["US", "UK"],
+            "amount"  => [1.0_f64, 2.0],
+        }
+        .expect("frame valid");
+
+        let err = InMemoryCube::new(df, geo_schema()).expect_err("empty member value");
+        match err {
+            Error::MalformedMemberValue { dim, level, value } => {
+                assert_eq!(dim.as_str(), "Geography");
+                assert_eq!(level.as_str(), "Region");
+                assert_eq!(value, "");
+            }
+            other => panic!("wrong variant: {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn members_returns_children_in_btree_order() {
+        // Input order on disk is { A, C, B }; output must be [A, B, C].
+        let df = df! {
+            "region"  => ["World", "World", "World"],
+            "country" => ["A", "C", "B"],
+            "amount"  => [1.0_f64, 2.0, 3.0],
+        }
+        .expect("frame valid");
+        let cube = InMemoryCube::new(df, geo_schema()).expect("construct cube");
+
+        let members = cube
+            .members(
+                &n("Geography"),
+                &n("Default"),
+                &world_ref(vec![n("World")]),
+                MemberRelation::Children,
+            )
+            .await
+            .expect("children query");
+        let tails: Vec<&str> = members
+            .iter()
+            .map(|m| m.path.tail().last().expect("has tail").as_str())
+            .collect();
+        assert_eq!(tails, vec!["A", "B", "C"]);
+    }
+
+    #[tokio::test]
+    async fn members_returns_siblings_excluding_self() {
+        let df = df! {
+            "region"  => ["World"; 4],
+            "country" => ["Q1", "Q2", "Q3", "Q4"],
+            "amount"  => [1.0_f64, 2.0, 3.0, 4.0],
+        }
+        .expect("frame valid");
+        let cube = InMemoryCube::new(df, geo_schema()).expect("construct cube");
+
+        let siblings = cube
+            .members(
+                &n("Geography"),
+                &n("Default"),
+                &world_ref(vec![n("World"), n("Q1")]),
+                MemberRelation::Siblings,
+            )
+            .await
+            .expect("siblings query");
+        let tails: Vec<&str> = siblings
+            .iter()
+            .map(|m| m.path.tail().last().expect("has tail").as_str())
+            .collect();
+        assert_eq!(tails, vec!["Q2", "Q3", "Q4"]);
+    }
+
+    #[tokio::test]
+    async fn members_returns_parent() {
+        let df = df! {
+            "region"  => ["World"],
+            "country" => ["US"],
+            "amount"  => [1.0_f64],
+        }
+        .expect("frame valid");
+        let cube = InMemoryCube::new(df, geo_schema()).expect("construct cube");
+
+        let parents = cube
+            .members(
+                &n("Geography"),
+                &n("Default"),
+                &world_ref(vec![n("World"), n("US")]),
+                MemberRelation::Parent,
+            )
+            .await
+            .expect("parent query");
+        assert_eq!(parents.len(), 1);
+        assert_eq!(parents[0].path.head().as_str(), "World");
+        assert!(parents[0].path.tail().is_empty());
+    }
+
+    #[tokio::test]
+    async fn members_returns_leaves_via_dfs() {
+        // World → US → {CA, NY}. Leaves of US must be [CA, NY] in BTreeMap
+        // order.
+        let df = df! {
+            "world"   => ["World", "World"],
+            "country" => ["US", "US"],
+            "city"    => ["NY", "CA"],
+            "amount"  => [1.0_f64, 2.0],
+        }
+        .expect("frame valid");
+        let cube = InMemoryCube::new(df, geo3_schema()).expect("construct cube");
+
+        let leaves = cube
+            .members(
+                &n("Geography"),
+                &n("Default"),
+                &world_ref(vec![n("World"), n("US")]),
+                MemberRelation::Leaves,
+            )
+            .await
+            .expect("leaves query");
+        let tails: Vec<&str> = leaves
+            .iter()
+            .map(|m| m.path.tail().last().expect("has tail").as_str())
+            .collect();
+        assert_eq!(tails, vec!["CA", "NY"]);
+    }
+
+    #[tokio::test]
+    async fn members_descendants_respects_depth() {
+        // World → US → {CA, NY}.
+        let df = df! {
+            "world"   => ["World", "World"],
+            "country" => ["US", "US"],
+            "city"    => ["CA", "NY"],
+            "amount"  => [1.0_f64, 2.0],
+        }
+        .expect("frame valid");
+        let cube = InMemoryCube::new(df, geo3_schema()).expect("construct cube");
+
+        let d1 = cube
+            .members(
+                &n("Geography"),
+                &n("Default"),
+                &world_ref(vec![n("World")]),
+                MemberRelation::Descendants(1),
+            )
+            .await
+            .expect("depth-1 query");
+        assert_eq!(d1.len(), 1, "only the single Country member at depth 1");
+
+        let d2 = cube
+            .members(
+                &n("Geography"),
+                &n("Default"),
+                &world_ref(vec![n("World")]),
+                MemberRelation::Descendants(2),
+            )
+            .await
+            .expect("depth-2 query");
+        // Pre-order DFS: US, CA, NY.
+        let tails: Vec<&str> = d2
+            .iter()
+            .map(|m| m.path.tail().last().expect("has tail").as_str())
+            .collect();
+        assert_eq!(tails, vec!["US", "CA", "NY"]);
+    }
+
+    #[tokio::test]
+    async fn members_rejects_unknown_hierarchy() {
+        let cube = InMemoryCube::new(small_frame(), small_schema()).expect("construct cube");
+        let at = world_ref(vec![n("West")]);
+        // `Geography` exists, but `NoSuch` does not.
+        let err = cube
+            .members(&n("Geography"), &n("NoSuch"), &at, MemberRelation::Children)
+            .await
+            .expect_err("unknown hierarchy");
+        match err {
+            Error::UnknownHierarchy { dim, hierarchy } => {
+                assert_eq!(dim.as_str(), "Geography");
+                assert_eq!(hierarchy.as_str(), "NoSuch");
+            }
+            other => panic!("wrong variant: {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn members_rejects_hierarchy_mismatched_memberref() {
+        let cube = InMemoryCube::new(small_frame(), small_schema()).expect("construct cube");
+        // Call asks about Geography/Default, but the ref points to Time/Default.
+        let at = MemberRef::new(n("Time"), n("Default"), Path::of(n("2026-01")));
+        let err = cube
+            .members(
+                &n("Geography"),
+                &n("Default"),
+                &at,
+                MemberRelation::Children,
+            )
+            .await
+            .expect_err("ref/hierarchy mismatch");
+        match err {
+            Error::MemberRefHierarchyMismatch {
+                expected_dim,
+                expected_hierarchy,
+                actual_dim,
+                actual_hierarchy,
+            } => {
+                assert_eq!(expected_dim.as_str(), "Geography");
+                assert_eq!(expected_hierarchy.as_str(), "Default");
+                assert_eq!(actual_dim.as_str(), "Time");
+                assert_eq!(actual_hierarchy.as_str(), "Default");
+            }
+            other => panic!("wrong variant: {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn members_rejects_unknown_path() {
+        let cube = InMemoryCube::new(small_frame(), small_schema()).expect("construct cube");
+        let at = world_ref(vec![n("NoSuchRegion")]);
+        let err = cube
+            .members(
+                &n("Geography"),
+                &n("Default"),
+                &at,
+                MemberRelation::Children,
+            )
+            .await
+            .expect_err("unknown path");
+        match err {
+            Error::UnknownMember {
+                dim,
+                hierarchy,
+                path,
+            } => {
+                assert_eq!(dim.as_str(), "Geography");
+                assert_eq!(hierarchy.as_str(), "Default");
+                assert_eq!(path.head().as_str(), "NoSuchRegion");
+            }
+            other => panic!("wrong variant: {other:?}"),
+        }
     }
 }
