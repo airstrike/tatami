@@ -5,10 +5,15 @@
 //! and every dimension-level key must have a column of a sensible dtype in
 //! the fact [`DataFrame`]. Phase 5b (this file + [`catalogue`]) builds a
 //! per-hierarchy member tree once at construction time and answers
-//! [`InMemoryCube::members`] from it. [`InMemoryCube::query`] still
-//! short-circuits with [`Error::NotImplemented`] until Phase 5c–g land.
+//! [`InMemoryCube::members`] from it. Phase 5c ([`resolve`]) lifts the
+//! public [`Query`] into a crate-internal `ResolvedQuery` that carries
+//! schema-binding proofs; this is the only place in the pipeline where
+//! `Result` appears for ref-existence failures. [`InMemoryCube::query`]
+//! still short-circuits with [`Error::NotImplemented`] until Phase 5d–g
+//! land.
 
 mod catalogue;
+mod resolve;
 
 use polars_core::prelude::{Column, DataFrame, DataType};
 use tatami::query::Path;
@@ -27,9 +32,9 @@ use crate::catalogue::Catalogue;
 /// [`Error::NotImplemented`].
 #[derive(Debug)]
 pub struct InMemoryCube {
-    schema: Schema,
-    catalogue: Catalogue,
-    // Prefixed with `_` to silence dead-code warnings until Phase 5c–g wires
+    pub(crate) schema: Schema,
+    pub(crate) catalogue: Catalogue,
+    // Prefixed with `_` to silence dead-code warnings until Phase 5d–g wires
     // the fact frame into evaluation. Renamed to `df` at that point.
     _df: DataFrame,
 }
@@ -68,6 +73,17 @@ impl InMemoryCube {
     #[allow(dead_code)]
     pub(crate) fn catalogue(&self) -> &Catalogue {
         &self.catalogue
+    }
+
+    /// Lift a public [`Query`] into a crate-internal `ResolvedQuery` bound
+    /// to this cube's schema and catalogue — Phase 5c of MAP_PLAN.md §5.
+    ///
+    /// `Cube::query` does not yet invoke this; the wiring lands in Phase
+    /// 5g alongside set / tuple / metric evaluation. Exposed as
+    /// `pub(crate)` so 5d–g can reach it.
+    #[allow(dead_code)]
+    pub(crate) fn resolve<'s>(&'s self, q: &Query) -> Result<resolve::ResolvedQuery<'s>, Error> {
+        resolve::resolve(q, &self.schema, &self.catalogue)
     }
 }
 
@@ -219,6 +235,140 @@ pub enum Error {
     /// compatibility requires a fallible case rather than a panic.
     #[error("unsupported member relation: {0:?}")]
     UnsupportedRelation(MemberRelation),
+
+    // ── Phase 5c: resolve (Query → ResolvedQuery) ──────────────────────
+    //
+    // These variants surface from `crate::resolve::resolve`. Prefixed
+    // `Resolve*` so message text reads naturally when bubbled up through
+    // the shared `Error` type.
+    /// A name in [`tatami::Query::metrics`], a predicate, or an expression
+    /// `Ref` did not resolve to any measure or metric.
+    #[error("unresolved metric reference: {name}")]
+    ResolveUnresolvedRef {
+        /// The name the reference pointed at.
+        name: Name,
+    },
+
+    /// A ref matched both a measure and a metric — schema construction
+    /// rejects collisions at build time, so this variant is defensive.
+    #[error("ambiguous metric reference: {name} matches both a measure and a metric")]
+    ResolveAmbiguousRef {
+        /// The ambiguous name.
+        name: Name,
+    },
+
+    /// A dimension name in the query did not appear in the schema.
+    #[error("resolve: unknown dimension {dim}")]
+    ResolveUnknownDimension {
+        /// The unknown dimension name.
+        dim: Name,
+    },
+
+    /// A hierarchy name did not exist within the named dimension.
+    #[error("resolve: dimension {dim} has no hierarchy named {hierarchy}")]
+    ResolveUnknownHierarchy {
+        /// Dimension name.
+        dim: Name,
+        /// Hierarchy name that was not found.
+        hierarchy: Name,
+    },
+
+    /// A level name did not exist within the named hierarchy.
+    #[error("resolve: dimension {dim}, hierarchy {hierarchy}: no level named {level}")]
+    ResolveUnknownLevel {
+        /// Dimension name.
+        dim: Name,
+        /// Hierarchy name.
+        hierarchy: Name,
+        /// Level name that was not found.
+        level: Name,
+    },
+
+    /// A `MemberRef`'s path does not structurally fit in the hierarchy
+    /// (too long). Full catalogue existence is checked at eval time.
+    #[error("resolve: dimension {dim}, hierarchy {hierarchy}: unknown member at path {path}")]
+    ResolveUnknownMember {
+        /// Dimension name.
+        dim: Name,
+        /// Hierarchy name.
+        hierarchy: Name,
+        /// The offending path.
+        path: Path,
+    },
+
+    /// `Expr::Lag` named a dimension whose kind is not Time.
+    #[error("resolve: Lag over dimension {dim} — not a time dimension")]
+    ResolveLagDimNotTime {
+        /// The offending dimension.
+        dim: Name,
+    },
+
+    /// `Expr::PeriodsToDate` named a level that does not appear in any
+    /// Time-kind hierarchy.
+    #[error("resolve: PeriodsToDate level {level} does not appear in any time hierarchy")]
+    ResolvePeriodsToDateLevelNotInTime {
+        /// The offending level name.
+        level: Name,
+    },
+
+    /// `Set::Named` referenced a named set not declared in the schema.
+    #[error("resolve: unknown named set {name}")]
+    ResolveUnknownNamedSet {
+        /// The offending name.
+        name: Name,
+    },
+
+    /// A named set transitively references itself.
+    #[error("resolve: named set {name} participates in a cycle")]
+    ResolveNamedSetCycle {
+        /// The named set at which the cycle was detected.
+        name: Name,
+    },
+
+    /// `Set::CrossJoin` sides addressed a common dimension.
+    #[error("resolve: cross-join sides overlap on dimension {dim}")]
+    ResolveCrossJoinDimsOverlap {
+        /// The shared dimension.
+        dim: Name,
+    },
+
+    /// `Set::Union` sides addressed different dimensions.
+    #[error("resolve: union sides address different dimensions: {left_dims:?} vs {right_dims:?}")]
+    ResolveUnionDimsMismatch {
+        /// Dimensions addressed by the left side.
+        left_dims: Vec<Name>,
+        /// Dimensions addressed by the right side.
+        right_dims: Vec<Name>,
+    },
+
+    /// `Set::Descendants.to_level` was at or above the source set's output
+    /// level — descendants must go deeper.
+    #[error(
+        "resolve: descendants to_level {to_level} is not below the source set's level {set_level}"
+    )]
+    ResolveDescendantsLevelNotBelow {
+        /// The source set's output level.
+        set_level: Name,
+        /// The requested target level.
+        to_level: Name,
+    },
+
+    /// `Set::Range.from` and `Set::Range.to` are at different levels.
+    #[error("resolve: range endpoints at different levels: {from_level} vs {to_level}")]
+    ResolveRangeMembersAtDifferentLevels {
+        /// The `from` member's level.
+        from_level: Name,
+        /// The `to` member's level.
+        to_level: Name,
+    },
+
+    /// A set composition could not be resolved because the inner set's
+    /// shape is ambiguous (for example, `Children` of a cross-join).
+    #[error("resolve: set composition is not well-formed: {reason}")]
+    ResolveSetCompositionIllFormed {
+        /// Human-readable reason.
+        reason: &'static str,
+    },
 }
 
 // ── Validation ─────────────────────────────────────────────────────────────

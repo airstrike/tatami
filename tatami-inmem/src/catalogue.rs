@@ -130,6 +130,28 @@ impl Catalogue {
         }
     }
 
+    /// Whether the given `(dim, hierarchy, path)` locates a real node in
+    /// this catalogue.
+    ///
+    /// Used by Phase 5c's `resolve::resolve_member_ref` to verify that
+    /// [`MemberRef`] instances carried by queries point at members the
+    /// backing fact source has actually observed. `None` if the `(dim,
+    /// hierarchy)` pair isn't catalogued at all — the caller distinguishes
+    /// that from "hierarchy exists but path doesn't".
+    pub(crate) fn path_exists(&self, dim: &Name, hierarchy: &Name, path: &Path) -> Option<bool> {
+        let key = (dim.clone(), hierarchy.clone());
+        let root = self.by_hierarchy.get(&key)?;
+        let segments: Vec<&Name> = path.segments().collect();
+        let mut cursor = root;
+        for seg in segments {
+            match cursor.children.get(seg) {
+                Some(child) => cursor = child,
+                None => return Some(false),
+            }
+        }
+        Some(true)
+    }
+
     /// Every member at `level_index` (0-based from the root) of a given
     /// `(dim, hierarchy)`. Returns `None` if the pair is not catalogued.
     ///
