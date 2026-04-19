@@ -39,7 +39,7 @@ mod schema;
 mod theme;
 mod widgets;
 
-use composer::{MetricPick, axis, filter, metric, slicer, top_n};
+use composer::{axis, dim, filter, metric, slicer, top_n};
 use theme::constants::{CONTROL_HEIGHT, ICON_BUTTON_PADDING, ICON_SIZE, TEXT_SIZE};
 
 fn main() -> iced::Result {
@@ -252,7 +252,7 @@ impl App {
             return center(text("Loading hewton facts\u{2026}").size(TEXT_SIZE)).into();
         };
 
-        let metric_options = composer::metric_options(schema);
+        let metric_options = metric::options(schema);
 
         let rows_view = axis::view(&self.rows, schema, "Rows").map(Message::Rows);
         let columns_view = axis::view(&self.columns, schema, "Columns").map(Message::Columns);
@@ -350,7 +350,7 @@ impl App {
         let Some(schema) = self.schema_ref.as_ref() else {
             return Task::none();
         };
-        let Some(dim_index) = composer::member_dim_index(&member, schema) else {
+        let Some(dim_index) = dim::index_for(&member.dim, schema) else {
             return Task::none();
         };
         let snap = self.snapshot();
@@ -364,7 +364,7 @@ impl App {
 }
 
 fn back_button<'a>() -> Element<'a, Message> {
-    button(icon::chevron_left().size(ICON_SIZE))
+    button(icon::chevron_left().size(ICON_SIZE).line_height(1.0))
         .padding(ICON_BUTTON_PADDING)
         .height(Length::Fixed(CONTROL_HEIGHT))
         .on_press(Message::Back)
@@ -406,9 +406,9 @@ fn build_query(
     schema: &Schema,
     rows: &axis::Pick,
     columns: &axis::Pick,
-    metrics: &[Option<MetricPick>],
+    metrics: &[Option<metric::Pick>],
     slicer_pins: &std::collections::HashMap<usize, MemberRef>,
-    top_n_by: Option<MetricPick>,
+    top_n_by: Option<metric::Pick>,
     filter_pick: Option<&filter::Pick>,
 ) -> Option<Query> {
     if metrics.is_empty() || metrics.iter().any(Option::is_none) {
@@ -417,7 +417,7 @@ fn build_query(
     let metric_names: Vec<Name> = metrics
         .iter()
         .flatten()
-        .map(|pick| composer::metric_name(schema, *pick))
+        .map(|pick| metric::name(schema, *pick))
         .collect::<Option<Vec<_>>>()?;
 
     let mut axes = build_axes(schema, rows, columns)?;
@@ -440,7 +440,7 @@ fn build_query(
 
     // Top-N is inert without a rows axis; Scalar / Pages pass through.
     if let Some(pick) = top_n_by {
-        let by_name = composer::metric_name(schema, pick)?;
+        let by_name = metric::name(schema, pick)?;
         let n = NonZeroUsize::new(10).expect("10 is non-zero");
         axes = match axes {
             Axes::Series { rows } => Axes::Series {

@@ -9,7 +9,7 @@ use iced::{Alignment, Element, Length};
 use tatami::query::MemberRef;
 use tatami::schema::Schema;
 
-use crate::composer::{self, DimChoice, LevelChoice};
+use crate::composer::{dim, level};
 use crate::theme::constants::{INLINE_LABEL_WIDTH, PICKER_PADDING, PICKER_SIZE, TEXT_SIZE};
 
 /// An axis choice, sourced entirely from schema indices. `None` means
@@ -43,9 +43,9 @@ pub struct State {
 #[non_exhaustive]
 pub enum Message {
     /// Dim picker changed. `None` clears the axis entirely.
-    DimPicked(Option<DimChoice>),
+    DimPicked(Option<dim::Choice>),
     /// Level picker changed. `None` clears the axis back to `Pick::None`.
-    LevelPicked(Option<LevelChoice>),
+    LevelPicked(Option<level::Choice>),
 }
 
 impl State {
@@ -74,7 +74,7 @@ impl State {
         else {
             return false;
         };
-        let Some(target) = composer::member_dim_index(member, schema) else {
+        let Some(target) = dim::index_for(&member.dim, schema) else {
             return false;
         };
         if target != dim {
@@ -102,11 +102,11 @@ impl State {
 /// Build the dim + optional-level picker row for this axis. `label` is
 /// the static "Rows"/"Columns" tag shown to the left of the pickers.
 pub fn view<'a>(state: &'a State, schema: &'a Schema, label: &'static str) -> Element<'a, Message> {
-    let options = composer::dim_options(schema);
+    let options = dim::options(schema);
     let selected = current_dim_choice(&options, &state.pick);
 
-    let dim_list = pick_list(selected, options, |c: &DimChoice| c.label.clone())
-        .on_select(|c: DimChoice| Message::DimPicked(Some(c)))
+    let dim_list = pick_list(selected, options, |c: &dim::Choice| c.label.clone())
+        .on_select(|c: dim::Choice| Message::DimPicked(Some(c)))
         .placeholder("(none)")
         .text_size(PICKER_SIZE)
         .padding(PICKER_PADDING)
@@ -120,7 +120,7 @@ pub fn view<'a>(state: &'a State, schema: &'a Schema, label: &'static str) -> El
             hierarchy,
             level,
         } => {
-            let options: Vec<LevelChoice> = schema.dimensions[dim]
+            let options: Vec<level::Choice> = schema.dimensions[dim]
                 .hierarchies
                 .iter()
                 .enumerate()
@@ -128,7 +128,7 @@ pub fn view<'a>(state: &'a State, schema: &'a Schema, label: &'static str) -> El
                     h.levels
                         .iter()
                         .enumerate()
-                        .map(move |(l_idx, l)| LevelChoice {
+                        .map(move |(l_idx, l)| level::Choice {
                             hierarchy: h_idx,
                             level: l_idx,
                             label: if schema.dimensions[dim].hierarchies.len() > 1 {
@@ -143,8 +143,8 @@ pub fn view<'a>(state: &'a State, schema: &'a Schema, label: &'static str) -> El
                 .iter()
                 .find(|c| c.hierarchy == hierarchy && c.level == level)
                 .cloned();
-            pick_list(selected, options, |c: &LevelChoice| c.label.clone())
-                .on_select(|c: LevelChoice| Message::LevelPicked(Some(c)))
+            pick_list(selected, options, |c: &level::Choice| c.label.clone())
+                .on_select(|c: level::Choice| Message::LevelPicked(Some(c)))
                 .placeholder("(level)")
                 .text_size(PICKER_SIZE)
                 .padding(PICKER_PADDING)
@@ -174,7 +174,7 @@ pub fn view<'a>(state: &'a State, schema: &'a Schema, label: &'static str) -> El
 /// Translate a dim-picker selection into a `Pick`. A new dim seeds the
 /// axis to that dim's first hierarchy / first level so the query is
 /// immediately runnable without a second click.
-fn pick_from_dim(schema: &Schema, choice: Option<DimChoice>) -> Pick {
+fn pick_from_dim(schema: &Schema, choice: Option<dim::Choice>) -> Pick {
     let Some(choice) = choice else {
         return Pick::None;
     };
@@ -193,7 +193,7 @@ fn pick_from_dim(schema: &Schema, choice: Option<DimChoice>) -> Pick {
 
 /// Translate a level-picker selection into a `Pick`. Only meaningful
 /// once a dim is already selected.
-fn pick_from_level(current: Pick, choice: Option<LevelChoice>) -> Pick {
+fn pick_from_level(current: Pick, choice: Option<level::Choice>) -> Pick {
     match (current, choice) {
         (Pick::Set { dim, .. }, Some(c)) => Pick::Set {
             dim,
@@ -205,7 +205,7 @@ fn pick_from_level(current: Pick, choice: Option<LevelChoice>) -> Pick {
     }
 }
 
-fn current_dim_choice(options: &[DimChoice], pick: &Pick) -> Option<DimChoice> {
+fn current_dim_choice(options: &[dim::Choice], pick: &Pick) -> Option<dim::Choice> {
     match *pick {
         Pick::Set { dim, .. } => options.iter().find(|c| c.index == dim).cloned(),
         Pick::None => None,

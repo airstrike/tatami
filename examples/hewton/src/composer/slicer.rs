@@ -152,7 +152,7 @@ fn picker_row<'a>(dim_index: usize, dim: &'a Dimension, state: &'a State) -> Ele
         .width(Length::Fill);
 
     let clear: Element<'a, Message> = if state.pins.contains_key(&dim_index) {
-        button(icon::close().size(ICON_SIZE))
+        button(icon::close().size(ICON_SIZE).line_height(1.0))
             .padding(ICON_BUTTON_PADDING)
             .height(Length::Fixed(CONTROL_HEIGHT))
             .on_press(Message::Picked(dim_index, None))

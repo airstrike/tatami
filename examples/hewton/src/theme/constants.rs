@@ -19,9 +19,9 @@ pub const PICKER_PADDING: [u16; 2] = [4, 8];
 /// Icon button glyph size (for `plus` / `close` etc.).
 pub const ICON_SIZE: f32 = 14.0;
 
-/// Icon button padding — `[vertical, horizontal]`. Pairs with
-/// [`ICON_SIZE`] to land near a tight icon-button square.
-pub const ICON_BUTTON_PADDING: [u16; 2] = [3, 6];
+/// Icon button padding — `[vertical, horizontal]`, symmetric so the
+/// button is square. `(ICON_SIZE + 2×pad) == CONTROL_HEIGHT`.
+pub const ICON_BUTTON_PADDING: [u16; 2] = [4, 4];
 
 /// Fixed visual height for icon buttons — pinned to match iced's
 /// intrinsic pick_list height (PICKER_SIZE 12 + PICKER_PADDING vertical

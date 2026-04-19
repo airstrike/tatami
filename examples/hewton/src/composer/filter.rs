@@ -10,7 +10,7 @@ use iced::{Element, Length};
 use tatami::query::Predicate;
 use tatami::schema::Schema;
 
-use crate::composer::{self, MetricChoice, MetricPick};
+use crate::composer::metric;
 use crate::theme::constants::{HEADING_SIZE, PICKER_PADDING, PICKER_SIZE, TEXT_SIZE};
 
 /// Numeric predicate kind. `Predicate::In` / `NotIn` aren't modelled
@@ -54,14 +54,14 @@ impl fmt::Display for KindChoice {
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Pick {
     pub kind: Kind,
-    pub by: MetricPick,
+    pub by: metric::Pick,
     pub value: f64,
 }
 
 #[derive(Clone, Default)]
 pub struct State {
     pub kind: Option<Kind>,
-    pub by: Option<MetricPick>,
+    pub by: Option<metric::Pick>,
     /// Raw text buffer behind the value input. Held separately from
     /// [`Pick::value`] so a mid-typing string like "12." doesn't
     /// flap the query.
@@ -74,7 +74,7 @@ pub struct State {
 #[non_exhaustive]
 pub enum Message {
     KindPicked(Option<Kind>),
-    ByPicked(Option<MetricChoice>),
+    ByPicked(Option<metric::Choice>),
     ValueChanged(String),
 }
 
@@ -116,24 +116,24 @@ impl State {
 }
 
 pub fn build_predicate(schema: &Schema, filter: &Pick) -> Option<Predicate> {
-    let metric = composer::metric_name(schema, filter.by)?;
+    let name = metric::name(schema, filter.by)?;
     Some(match filter.kind {
         Kind::Eq => Predicate::Eq {
-            metric,
+            metric: name,
             value: filter.value,
         },
         Kind::Gt => Predicate::Gt {
-            metric,
+            metric: name,
             value: filter.value,
         },
         Kind::Lt => Predicate::Lt {
-            metric,
+            metric: name,
             value: filter.value,
         },
     })
 }
 
-pub fn view<'a>(state: &'a State, metric_options: &[MetricChoice]) -> Element<'a, Message> {
+pub fn view<'a>(state: &'a State, metric_options: &[metric::Choice]) -> Element<'a, Message> {
     let kind_options = vec![
         KindChoice::Off,
         KindChoice::On(Kind::Eq),
@@ -165,12 +165,14 @@ pub fn view<'a>(state: &'a State, metric_options: &[MetricChoice]) -> Element<'a
     let selected_by = state
         .by
         .and_then(|pick| metric_options.iter().find(|c| c.pick == pick).cloned());
-    let by_picker = pick_list(selected_by, by_options, |c: &MetricChoice| c.label.clone())
-        .on_select(|c: MetricChoice| Message::ByPicked(Some(c)))
-        .placeholder("(pick a metric)")
-        .text_size(PICKER_SIZE)
-        .padding(PICKER_PADDING)
-        .width(Length::Fill);
+    let by_picker = pick_list(selected_by, by_options, |c: &metric::Choice| {
+        c.label.clone()
+    })
+    .on_select(|c: metric::Choice| Message::ByPicked(Some(c)))
+    .placeholder("(pick a metric)")
+    .text_size(PICKER_SIZE)
+    .padding(PICKER_PADDING)
+    .width(Length::Fill);
 
     let value_input = text_input("(value)", &state.value_text)
         .on_input(Message::ValueChanged)

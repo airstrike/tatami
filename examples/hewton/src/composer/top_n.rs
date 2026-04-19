@@ -5,8 +5,7 @@
 use iced::widget::{button, column, pick_list, row, text};
 use iced::{Alignment, Element, Length};
 
-use crate::composer::axis;
-use crate::composer::{MetricChoice, MetricPick};
+use crate::composer::{axis, metric};
 use crate::icon;
 use crate::theme::constants::{
     CONTROL_HEIGHT, HEADING_SIZE, ICON_BUTTON_PADDING, ICON_SIZE, PICKER_PADDING, PICKER_SIZE,
@@ -15,13 +14,13 @@ use crate::theme::constants::{
 
 #[derive(Clone, Copy, Default)]
 pub struct State {
-    pub by: Option<MetricPick>,
+    pub by: Option<metric::Pick>,
 }
 
 #[derive(Debug, Clone)]
 #[non_exhaustive]
 pub enum Message {
-    ByPicked(Option<MetricChoice>),
+    ByPicked(Option<metric::Choice>),
 }
 
 impl State {
@@ -37,7 +36,7 @@ impl State {
 pub fn view<'a>(
     state: &'a State,
     rows: &axis::Pick,
-    options: &[MetricChoice],
+    options: &[metric::Choice],
 ) -> Element<'a, Message> {
     let rows_present = matches!(rows, axis::Pick::Set { .. });
 
@@ -52,15 +51,17 @@ pub fn view<'a>(
         .by
         .and_then(|pick| options.iter().find(|c| c.pick == pick).cloned());
 
-    let picker = pick_list(selected, picker_options, |c: &MetricChoice| c.label.clone())
-        .on_select(|c: MetricChoice| Message::ByPicked(Some(c)))
-        .placeholder("(off)")
-        .text_size(PICKER_SIZE)
-        .padding(PICKER_PADDING)
-        .width(Length::Fill);
+    let picker = pick_list(selected, picker_options, |c: &metric::Choice| {
+        c.label.clone()
+    })
+    .on_select(|c: metric::Choice| Message::ByPicked(Some(c)))
+    .placeholder("(off)")
+    .text_size(PICKER_SIZE)
+    .padding(PICKER_PADDING)
+    .width(Length::Fill);
 
     let clear: Element<'a, Message> = if state.by.is_some() {
-        button(icon::close().size(ICON_SIZE))
+        button(icon::close().size(ICON_SIZE).line_height(1.0))
             .padding(ICON_BUTTON_PADDING)
             .height(Length::Fixed(CONTROL_HEIGHT))
             .on_press(Message::ByPicked(None))
