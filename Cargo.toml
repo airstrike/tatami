@@ -37,9 +37,11 @@ polars-core = { version = "0.51", default-features = false, features = ["serde"]
 # Async runtime for the reference impl and examples.
 tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
 
-# Example-only — iced 0.15-dev off upstream master. Pin a commit once the
-# surface stabilises; for now riding the branch.
-iced = { git = "https://github.com/iced-rs/iced", branch = "master", features = ["tokio"] }
+# Example-only — iced 0.15-dev off airstrike/iced's dev branch. Matches
+# inboard, sweeten, and fount; the fork has extra text fields (letter_spacing,
+# font_features, …) those crates depend on. Switch back to upstream
+# iced-rs/iced once those land there.
+iced = { git = "https://github.com/airstrike/iced.git", branch = "dev", features = ["tokio"] }
 
 # Match inboard: build deps at high opt-level, own crate at low — fast
 # iteration, tolerable runtime. Tatami itself is cheap to compile so the
@@ -51,8 +53,17 @@ opt-level = 1
 opt-level = 3
 
 # iced 0.15-dev ships from git, not crates.io — transitive deps that
-# spec `iced_core = "0.15.0-dev"` (fount, hyozu eventually) need to
-# resolve via the same source. Pin here so cargo doesn't go looking on
+# spec `iced_* = "0.15.0-dev"` (fount, sweeten) need to resolve via the
+# same source. Pin each sub-crate so cargo doesn't go looking on
 # crates.io.
 [patch.crates-io]
-iced_core = { git = "https://github.com/iced-rs/iced", branch = "master" }
+iced          = { git = "https://github.com/airstrike/iced.git", branch = "dev" }
+iced_core     = { git = "https://github.com/airstrike/iced.git", branch = "dev" }
+iced_futures  = { git = "https://github.com/airstrike/iced.git", branch = "dev" }
+iced_graphics = { git = "https://github.com/airstrike/iced.git", branch = "dev" }
+iced_renderer = { git = "https://github.com/airstrike/iced.git", branch = "dev" }
+iced_runtime  = { git = "https://github.com/airstrike/iced.git", branch = "dev" }
+iced_widget   = { git = "https://github.com/airstrike/iced.git", branch = "dev" }
+# cosmic-text fork pairs with airstrike/iced — adds UnderlineStyle,
+# OpticalSize, FontVariations, text_decoration on Attrs, etc.
+cosmic-text = { git = "https://github.com/airstrike/cosmic-text", branch = "dev" }

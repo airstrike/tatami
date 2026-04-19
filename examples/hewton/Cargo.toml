@@ -26,3 +26,8 @@ polars-io = { version = "0.51", default-features = false, features = ["csv"] }
 
 # airstrike/fount for Google Fonts loading (Inter). Also hewton-only.
 fount = { git = "https://github.com/airstrike/fount.git" }
+
+# airstrike/sweeten — richer widget set on top of iced. Pivot rendering
+# uses sweeten::widget::table (closure takes &Row, optional headers,
+# sticky-header support) over iced's native table.
+sweeten = { git = "https://github.com/airstrike/sweeten", branch = "dev" }

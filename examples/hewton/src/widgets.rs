@@ -2,11 +2,12 @@
 //! are not the point; the `Results → widget` mapping is.
 //!
 //! For real dashboards, this module becomes `hyozu` adapters: `Scalar → KPI
-//! card`, `Series → Mark::Line`, `Pivot → iced::widget::table`, `Rollup →
+//! card`, `Series → Mark::Line`, `Pivot → sweeten::widget::table`, `Rollup →
 //! Mark::Choropleth / Mark::BubbleMap`.
 
-use iced::widget::{Column, column, container, row, rule, text};
-use iced::{Element, Font, Length, Padding, font};
+use iced::widget::{Column, column, container, row, rule, scrollable, text};
+use iced::{Alignment, Element, Font, Length, Padding, font};
+use sweeten::widget::table;
 
 use tatami::{Cell, Results, Tuple, pivot, rollup, scalar, series};
 
@@ -20,6 +21,7 @@ const BOLD: Font = Font {
     weight: font::Weight::Bold,
     stretch: font::Stretch::Normal,
     style: font::Style::Normal,
+    optical_size: font::OpticalSize::None,
 };
 
 /// One rendered card — heading, subtitle, and a body keyed off the query's
@@ -90,41 +92,54 @@ fn render_series(r: &series::Result) -> Element<'_, Message> {
         .into()
 }
 
-fn render_pivot(r: &pivot::Result) -> Element<'_, Message> {
-    // Header row — col_headers across the top.
-    let header_cells = std::iter::once(text("").width(Length::FillPortion(2)).into()).chain(
-        r.col_headers().iter().map(|col| {
-            text(format_tuple(col))
-                .font(BOLD)
-                .width(Length::FillPortion(3))
-                .into()
-        }),
-    );
-    let header: Element<'_, Message> = row(header_cells).into();
+/// A pre-formatted pivot row. Cells are pre-stringified so the column
+/// closures are pure indexed lookups. `Clone` is required by
+/// `sweeten::widget::table` — cheap since all fields are `String`.
+#[derive(Clone)]
+struct PivotRow {
+    header: String,
+    cells: Vec<String>,
+}
 
-    // Body rows — one per row_header.
-    let body = r
+fn render_pivot(r: &pivot::Result) -> Element<'_, Message> {
+    let rows: Vec<PivotRow> = r
         .row_headers()
         .iter()
         .zip(r.cells().iter())
-        .map(|(row_header, cells)| {
-            let cells_iter = std::iter::once(
-                text(format_tuple(row_header))
-                    .font(BOLD)
-                    .width(Length::FillPortion(2))
-                    .into(),
-            )
-            .chain(
-                cells
-                    .iter()
-                    .map(|cell| text(format_cell(cell)).width(Length::FillPortion(3)).into()),
-            );
-            row(cells_iter).into()
-        });
+        .map(|(h, cs)| PivotRow {
+            header: format_tuple(h),
+            cells: cs.iter().map(format_cell).collect(),
+        })
+        .collect();
 
-    column![header, Column::with_children(body).spacing(2)]
-        .spacing(6)
-        .into()
+    // Column 0 — the row header. Bold text, left-aligned.
+    let header_column = table::column(
+        Some(Element::from(text("").font(BOLD))),
+        |row: PivotRow| -> Element<'_, Message> { text(row.header).font(BOLD).into() },
+    );
+
+    // One data column per col_header. Each closure captures `i` by copy
+    // and indexes into the pre-formatted `cells` vec.
+    let mut columns = vec![header_column];
+    for (i, col_header) in r.col_headers().iter().enumerate() {
+        let label = format_tuple(col_header);
+        columns.push(
+            table::column(
+                Some(Element::from(text(label).font(BOLD))),
+                move |row: PivotRow| -> Element<'_, Message> { text(row.cells[i].clone()).into() },
+            )
+            .align_x(Alignment::End),
+        );
+    }
+
+    scrollable(
+        table(columns, rows)
+            .padding_x(8.0)
+            .padding_y(4.0)
+            .separator_x(0.0)
+            .separator_y(1.0),
+    )
+    .into()
 }
 
 fn render_rollup(tree: &rollup::Tree, depth: u16) -> Element<'_, Message> {

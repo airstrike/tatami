@@ -25,8 +25,8 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use iced::widget::{center, column, scrollable, text};
-use iced::{Element, Font, Task, Theme, font};
+use iced::widget::{center, column, pick_list, row, scrollable, text};
+use iced::{Alignment, Element, Font, Task, Theme, font};
 
 use polars_core::prelude::DataFrame;
 use tatami::schema::Schema;
@@ -35,11 +35,13 @@ use tatami_inmem::InMemoryCube;
 
 mod facts;
 mod queries;
+mod scenario;
 mod schema;
 mod theme;
 mod widgets;
 
 use queries::ExampleQuery;
+use scenario::Scenario;
 
 /// Primary UI typeface — Inter. Loaded from Google Fonts at startup via
 /// `fount`; until the network call resolves, iced falls back to its
@@ -49,6 +51,7 @@ pub const INTER: Font = Font {
     weight: font::Weight::Normal,
     stretch: font::Stretch::Normal,
     style: font::Style::Normal,
+    optical_size: font::OpticalSize::None,
 };
 
 fn main() -> iced::Result {
@@ -68,6 +71,7 @@ fn main() -> iced::Result {
 struct App {
     schema: Schema,
     cube: Option<Arc<InMemoryCube>>,
+    scenario: Scenario,
     results: HashMap<ExampleQuery, QueryState>,
     load_error: Option<String>,
 }
@@ -88,6 +92,9 @@ enum Message {
     QueryDone(ExampleQuery, Result<Results, String>),
     /// A Google Fonts family finished downloading + registering with iced.
     FontLoaded(&'static str, Result<(), String>),
+    /// The scenario picker changed — re-issue every query against the new
+    /// scenario. `PlanVsWhatIf` re-runs too (it just ignores the value).
+    ScenarioChanged(Scenario),
 }
 
 // ── new / update / view ────────────────────────────────────────────────────
@@ -106,6 +113,7 @@ impl App {
         let app = Self {
             schema,
             cube: None,
+            scenario: Scenario::Actual,
             results: HashMap::new(),
             load_error: None,
         };
@@ -122,11 +130,12 @@ impl App {
                 match InMemoryCube::new(df, self.schema.clone()) {
                     Ok(cube) => {
                         let cube = Arc::new(cube);
+                        let scenario = self.scenario;
                         let tasks: Vec<Task<Message>> = ExampleQuery::ALL
                             .into_iter()
                             .map(|eq| {
                                 self.results.insert(eq, QueryState::Running);
-                                spawn(cube.clone(), eq)
+                                spawn(cube.clone(), eq, scenario)
                             })
                             .collect();
                         self.cube = Some(cube);
@@ -155,6 +164,21 @@ impl App {
                 eprintln!("font load failed: {name} — {error}");
                 Task::none()
             }
+            Message::ScenarioChanged(scenario) => {
+                self.scenario = scenario;
+                if let Some(cube) = self.cube.clone() {
+                    let tasks: Vec<Task<Message>> = ExampleQuery::ALL
+                        .into_iter()
+                        .map(|eq| {
+                            self.results.insert(eq, QueryState::Running);
+                            spawn(cube.clone(), eq, scenario)
+                        })
+                        .collect();
+                    Task::batch(tasks)
+                } else {
+                    Task::none()
+                }
+            }
         }
     }
 
@@ -167,12 +191,24 @@ impl App {
             return center(text("Loading hewton facts\u{2026}").size(14)).into();
         }
 
+        // Scenario picker — drives the slicer for `FyRevenue`,
+        // `QuarterlyByRegion`, `WorldToCountry`. `PlanVsWhatIf` re-runs
+        // too but ignores the value (columns = [Plan, WhatIf_A]).
+        let picker: Element<'_, Message> = row![
+            text("Scenario:").size(13),
+            pick_list(Some(self.scenario), Scenario::ALL, Scenario::to_string,)
+                .on_select(Message::ScenarioChanged),
+        ]
+        .spacing(12)
+        .align_y(Alignment::Center)
+        .into();
+
         let cards = ExampleQuery::ALL
             .into_iter()
             .map(|eq| widgets::card(eq.heading(), eq.subtitle(), self.results.get(&eq)));
 
         scrollable(
-            column(cards)
+            column(std::iter::once(picker).chain(cards))
                 .spacing(16)
                 .padding(24)
                 .width(iced::Length::Fill),
@@ -183,10 +219,11 @@ impl App {
 
 // ── Query plumbing ─────────────────────────────────────────────────────────
 
-/// Fire one example query as an iced `Task`. The returned `Task` resolves
-/// to `Message::QueryDone(eq, Ok/Err)` when `cube.query(&q)` finishes.
-fn spawn(cube: Arc<InMemoryCube>, eq: ExampleQuery) -> Task<Message> {
-    let query = eq.query();
+/// Fire one example query as an iced `Task` against the selected scenario.
+/// The returned `Task` resolves to `Message::QueryDone(eq, Ok/Err)` when
+/// `cube.query(&q)` finishes.
+fn spawn(cube: Arc<InMemoryCube>, eq: ExampleQuery, scenario: Scenario) -> Task<Message> {
+    let query = eq.query(scenario);
     Task::future(async move {
         let outcome = cube.query(&query).await.map_err(|e| e.to_string());
         Message::QueryDone(eq, outcome)

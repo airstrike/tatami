@@ -655,8 +655,7 @@ dependencies = [
 [[package]]
 name = "cosmic-text"
 version = "0.18.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "bbe782a9e7520cc7de2232c957a47f99d3a35e855552677d07a557bc1a3b66ed"
+source = "git+https://github.com/airstrike/cosmic-text?branch=dev#adf549815c7b845090279180707d49c29ac4dc30"
 dependencies = [
  "bitflags 2.11.1",
  "fontdb",
@@ -821,7 +820,7 @@ checksum = "75b325c5dbd37f80359721ad39aca5a29fb04c89279657cffdda8736d0c0b9d2"
 [[package]]
 name = "dpi"
 version = "0.1.1"
-source = "git+https://github.com/iced-rs/winit.git?rev=05b8ff17a06562f0a10bb46e6eaacbe2a95cb5ed#05b8ff17a06562f0a10bb46e6eaacbe2a95cb5ed"
+source = "git+https://github.com/airstrike/winit.git?branch=unified-titlebar#68dbe08c5b96f91f0dcdfb8a4a7fd312a26c2885"
 
 [[package]]
 name = "dyn-clone"
@@ -1381,6 +1380,7 @@ dependencies = [
  "iced",
  "polars-core",
  "polars-io",
+ "sweeten",
  "tatami",
  "tatami-inmem",
  "tokio",
@@ -1508,7 +1508,7 @@ dependencies = [
 [[package]]
 name = "iced"
 version = "0.15.0-dev"
-source = "git+https://github.com/iced-rs/iced?branch=master#ac1b2c7123ad82643482c0b3a4a776246c966697"
+source = "git+https://github.com/airstrike/iced.git?branch=dev#30033625ebe33b6e0ad6bac203744e2c770720fb"
 dependencies = [
  "iced_core",
  "iced_debug",
@@ -1523,7 +1523,7 @@ dependencies = [
 [[package]]
 name = "iced_core"
 version = "0.15.0-dev"
-source = "git+https://github.com/iced-rs/iced?branch=master#ac1b2c7123ad82643482c0b3a4a776246c966697"
+source = "git+https://github.com/airstrike/iced.git?branch=dev#30033625ebe33b6e0ad6bac203744e2c770720fb"
 dependencies = [
  "bitflags 2.11.1",
  "bytes",
@@ -1540,7 +1540,7 @@ dependencies = [
 [[package]]
 name = "iced_debug"
 version = "0.15.0-dev"
-source = "git+https://github.com/iced-rs/iced?branch=master#ac1b2c7123ad82643482c0b3a4a776246c966697"
+source = "git+https://github.com/airstrike/iced.git?branch=dev#30033625ebe33b6e0ad6bac203744e2c770720fb"
 dependencies = [
  "iced_core",
  "iced_futures",
@@ -1550,7 +1550,7 @@ dependencies = [
 [[package]]
 name = "iced_futures"
 version = "0.15.0-dev"
-source = "git+https://github.com/iced-rs/iced?branch=master#ac1b2c7123ad82643482c0b3a4a776246c966697"
+source = "git+https://github.com/airstrike/iced.git?branch=dev#30033625ebe33b6e0ad6bac203744e2c770720fb"
 dependencies = [
  "futures",
  "iced_core",
@@ -1564,7 +1564,7 @@ dependencies = [
 [[package]]
 name = "iced_graphics"
 version = "0.15.0-dev"
-source = "git+https://github.com/iced-rs/iced?branch=master#ac1b2c7123ad82643482c0b3a4a776246c966697"
+source = "git+https://github.com/airstrike/iced.git?branch=dev#30033625ebe33b6e0ad6bac203744e2c770720fb"
 dependencies = [
  "bitflags 2.11.1",
  "bytemuck",
@@ -1582,7 +1582,7 @@ dependencies = [
 [[package]]
 name = "iced_program"
 version = "0.15.0-dev"
-source = "git+https://github.com/iced-rs/iced?branch=master#ac1b2c7123ad82643482c0b3a4a776246c966697"
+source = "git+https://github.com/airstrike/iced.git?branch=dev#30033625ebe33b6e0ad6bac203744e2c770720fb"
 dependencies = [
  "iced_graphics",
  "iced_runtime",
@@ -1591,7 +1591,7 @@ dependencies = [
 [[package]]
 name = "iced_renderer"
 version = "0.15.0-dev"
-source = "git+https://github.com/iced-rs/iced?branch=master#ac1b2c7123ad82643482c0b3a4a776246c966697"
+source = "git+https://github.com/airstrike/iced.git?branch=dev#30033625ebe33b6e0ad6bac203744e2c770720fb"
 dependencies = [
  "iced_graphics",
  "iced_tiny_skia",
@@ -1603,7 +1603,7 @@ dependencies = [
 [[package]]
 name = "iced_runtime"
 version = "0.15.0-dev"
-source = "git+https://github.com/iced-rs/iced?branch=master#ac1b2c7123ad82643482c0b3a4a776246c966697"
+source = "git+https://github.com/airstrike/iced.git?branch=dev#30033625ebe33b6e0ad6bac203744e2c770720fb"
 dependencies = [
  "bytes",
  "iced_core",
@@ -1615,7 +1615,7 @@ dependencies = [
 [[package]]
 name = "iced_tiny_skia"
 version = "0.15.0-dev"
-source = "git+https://github.com/iced-rs/iced?branch=master#ac1b2c7123ad82643482c0b3a4a776246c966697"
+source = "git+https://github.com/airstrike/iced.git?branch=dev#30033625ebe33b6e0ad6bac203744e2c770720fb"
 dependencies = [
  "bytemuck",
  "cosmic-text",
@@ -1625,13 +1625,13 @@ dependencies = [
  "log",
  "rustc-hash 2.1.2",
  "softbuffer",
- "tiny-skia",
+ "tiny-skia 0.12.0",
 ]
 
 [[package]]
 name = "iced_wgpu"
 version = "0.15.0-dev"
-source = "git+https://github.com/iced-rs/iced?branch=master#ac1b2c7123ad82643482c0b3a4a776246c966697"
+source = "git+https://github.com/airstrike/iced.git?branch=dev#30033625ebe33b6e0ad6bac203744e2c770720fb"
 dependencies = [
  "bitflags 2.11.1",
  "bytemuck",
@@ -1650,7 +1650,7 @@ dependencies = [
 [[package]]
 name = "iced_widget"
 version = "0.15.0-dev"
-source = "git+https://github.com/iced-rs/iced?branch=master#ac1b2c7123ad82643482c0b3a4a776246c966697"
+source = "git+https://github.com/airstrike/iced.git?branch=dev#30033625ebe33b6e0ad6bac203744e2c770720fb"
 dependencies = [
  "iced_renderer",
  "log",
@@ -1663,7 +1663,7 @@ dependencies = [
 [[package]]
 name = "iced_winit"
 version = "0.15.0-dev"
-source = "git+https://github.com/iced-rs/iced?branch=master#ac1b2c7123ad82643482c0b3a4a776246c966697"
+source = "git+https://github.com/airstrike/iced.git?branch=dev#30033625ebe33b6e0ad6bac203744e2c770720fb"
 dependencies = [
  "arboard",
  "iced_debug",
@@ -1671,7 +1671,6 @@ dependencies = [
  "iced_runtime",
  "log",
  "mundy",
- "objc2 0.5.2",
  "rustc-hash 2.1.2",
  "thiserror 2.0.18",
  "tracing",
@@ -3666,7 +3665,7 @@ dependencies = [
  "log",
  "memmap2",
  "smithay-client-toolkit",
- "tiny-skia",
+ "tiny-skia 0.11.4",
 ]
 
 [[package]]
@@ -4031,6 +4030,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "sweeten"
+version = "0.15.0-dev"
+source = "git+https://github.com/airstrike/sweeten?branch=dev#4a270336d7266262f3d928c2784c141857f532a9"
+dependencies = [
+ "iced_core",
+ "iced_runtime",
+ "iced_widget",
+ "unicode-segmentation",
+]
+
+[[package]]
 name = "syn"
 version = "2.0.117"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4164,7 +4174,21 @@ dependencies = [
  "bytemuck",
  "cfg-if",
  "log",
- "tiny-skia-path",
+ "tiny-skia-path 0.11.4",
+]
+
+[[package]]
+name = "tiny-skia"
+version = "0.12.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "47ffee5eaaf5527f630fb0e356b90ebdec84d5d18d937c5e440350f88c5a91ea"
+dependencies = [
+ "arrayref",
+ "arrayvec",
+ "bytemuck",
+ "cfg-if",
+ "log",
+ "tiny-skia-path 0.12.0",
 ]
 
 [[package]]
@@ -4172,6 +4196,17 @@ name = "tiny-skia-path"
 version = "0.11.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "9c9e7fc0c2e86a30b117d0462aa261b72b7a99b7ebd7deb3a14ceda95c5bdc93"
+dependencies = [
+ "arrayref",
+ "bytemuck",
+ "strict-num",
+]
+
+[[package]]
+name = "tiny-skia-path"
+version = "0.12.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "edca365c3faccca67d06593c5980fa6c57687de727a03131735bb85f01fdeeb9"
 dependencies = [
  "arrayref",
  "bytemuck",
@@ -5337,8 +5372,8 @@ checksum = "d6bbff5f0aada427a1e5a6da5f1f98158182f26556f345ac9e04d36d0ebed650"
 
 [[package]]
 name = "winit"
-version = "0.30.8"
-source = "git+https://github.com/iced-rs/winit.git?rev=05b8ff17a06562f0a10bb46e6eaacbe2a95cb5ed#05b8ff17a06562f0a10bb46e6eaacbe2a95cb5ed"
+version = "0.30.13"
+source = "git+https://github.com/airstrike/winit.git?branch=unified-titlebar#68dbe08c5b96f91f0dcdfb8a4a7fd312a26c2885"
 dependencies = [
  "ahash",
  "android-activity",

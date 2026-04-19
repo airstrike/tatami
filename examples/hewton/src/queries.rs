@@ -6,6 +6,8 @@ use tatami::query::{self, Set, Tuple};
 use tatami::schema::Name;
 use tatami::{Axes, MemberRef, Path, Query};
 
+use crate::scenario::Scenario;
+
 /// Closed set of example queries Hewton demonstrates.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum ExampleQuery {
@@ -45,24 +47,28 @@ impl ExampleQuery {
         }
     }
 
-    pub fn query(self) -> Query {
+    /// Construct the `Query` for this example against the selected
+    /// scenario. `PlanVsWhatIf` ignores `scenario` by design — its columns
+    /// axis *is* the scenario enumeration (Plan vs WhatIf_A), so a picker
+    /// value would be meaningless.
+    pub fn query(self, scenario: Scenario) -> Query {
         match self {
-            Self::FyRevenue => scalar_kpi(),
-            Self::QuarterlyByRegion => pivot_by_region(),
+            Self::FyRevenue => scalar_kpi(scenario),
+            Self::QuarterlyByRegion => pivot_by_region(scenario),
             Self::PlanVsWhatIf => variance_pivot(),
-            Self::WorldToCountry => rollup_by_territory(),
+            Self::WorldToCountry => rollup_by_territory(scenario),
         }
     }
 }
 
 // ── §3.5(a) Scalar ─────────────────────────────────────────────────────────
 
-fn scalar_kpi() -> Query {
+fn scalar_kpi(scenario: Scenario) -> Query {
     Query {
         axes: Axes::Scalar,
         slicer: Tuple::of([
             MemberRef::new(n("Time"), n("Fiscal"), Path::of(n("FY2026"))),
-            MemberRef::scenario(n("Actual")),
+            MemberRef::scenario(n(scenario.name())),
         ])
         .expect("distinct dims"),
         metrics: vec![n("Revenue"), n("RevenueMoM")],
@@ -72,7 +78,7 @@ fn scalar_kpi() -> Query {
 
 // ── §3.5(b) Pivot — Descendants over a range ───────────────────────────────
 
-fn pivot_by_region() -> Query {
+fn pivot_by_region(scenario: Scenario) -> Query {
     Query {
         axes: Axes::Pivot {
             // Descendants of a Set::Range — this is what the Children /
@@ -87,7 +93,7 @@ fn pivot_by_region() -> Query {
             .descendants_to(n("Quarter")),
             columns: Set::members(n("Geography"), n("Default"), n("Region")),
         },
-        slicer: Tuple::of([MemberRef::scenario(n("Actual"))]).expect("distinct dims"),
+        slicer: Tuple::of([MemberRef::scenario(n(scenario.name()))]).expect("distinct dims"),
         metrics: vec![n("Revenue")],
         options: query::Options {
             non_empty: true,
@@ -116,7 +122,7 @@ fn variance_pivot() -> Query {
 
 // ── §3.5(d) Series — descendants of a member along an axis ─────────────────
 
-fn rollup_by_territory() -> Query {
+fn rollup_by_territory(scenario: Scenario) -> Query {
     Query {
         axes: Axes::Series {
             // MemberRef → Set sugar: `.descendants_to(level)` wraps the
@@ -126,7 +132,7 @@ fn rollup_by_territory() -> Query {
         },
         slicer: Tuple::of([
             MemberRef::time(n("FY2026")),
-            MemberRef::scenario(n("Actual")),
+            MemberRef::scenario(n(scenario.name())),
         ])
         .expect("distinct dims"),
         metrics: vec![n("room_nights_sold")],
