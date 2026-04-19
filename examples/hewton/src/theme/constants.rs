@@ -27,3 +27,8 @@ pub const ICON_BUTTON_PADDING: [u16; 2] = [3, 6];
 /// intrinsic pick_list height (PICKER_SIZE 12 + PICKER_PADDING vertical
 /// × 2 + internal border). Tune this one number if the pick_list drifts.
 pub const CONTROL_HEIGHT: f32 = 22.0;
+
+/// Fixed-width gutter for inline labels that sit to the left of a
+/// picker on a single row. Keeps the labels tidy-aligned across
+/// sidebar sections.
+pub const INLINE_LABEL_WIDTH: f32 = 64.0;

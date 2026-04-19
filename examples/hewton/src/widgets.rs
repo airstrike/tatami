@@ -1,9 +1,6 @@
-//! Rendering per `Results` variant. Kept deliberately minimal — the widgets
-//! are not the point; the `Results → widget` mapping is.
-//!
-//! For real dashboards, this module becomes `hyozu` adapters: `Scalar → KPI
-//! card`, `Series → Mark::Line`, `Pivot → sweeten::widget::table`, `Rollup →
-//! Mark::Choropleth / Mark::BubbleMap`.
+//! Rendering per `Results` variant. Kept minimal — the widgets aren't
+//! the point; the `Results → widget` mapping is. Real dashboards slot
+//! in hyozu adapters (Scalar → KPI card, Series → Mark::Line, etc.).
 
 use iced::widget::{Column, button, column, container, row, scrollable, text};
 use iced::{Alignment, Element, Font, Length, Padding, font};
@@ -15,8 +12,7 @@ use tatami::{Cell, Results, Tuple, pivot, rollup, scalar, series};
 use crate::theme;
 use crate::{Message, QueryState};
 
-// Inter at bold weight — matches the application's default_font family so
-// headings stay in the same typeface as body text, one step heavier.
+// Bold weight of the app's default Inter family.
 const BOLD: Font = Font {
     family: font::Family::Name("Inter"),
     weight: font::Weight::Bold,
@@ -25,13 +21,9 @@ const BOLD: Font = Font {
     optical_size: font::OpticalSize::None,
 };
 
-/// A panel wrapping the current query's outcome — loading, error, or the
-/// rendered `Results`. Schema-blind: the panel content is entirely derived
-/// from the runtime `QueryState`.
-///
-/// The container always fills the available space and scrolls internally so
-/// transient states (`Idle` / `Running` / `Err`) don't collapse the panel
-/// height and jitter the surrounding layout when the result arrives.
+/// Panel wrapping the query outcome. Fills available space and
+/// scrolls internally so transient states don't collapse the panel
+/// height and jitter the surrounding layout when results arrive.
 pub fn result_panel(state: &QueryState) -> Element<'_, Message> {
     let body: Element<'_, Message> = match state {
         QueryState::Idle => text("Pick row/column/metric to run a query.").into(),
@@ -48,12 +40,8 @@ pub fn result_panel(state: &QueryState) -> Element<'_, Message> {
         .into()
 }
 
-/// The exhaustive `Results` match — this is the payoff of §3.3's closed
-/// shape. A backend returning a shape-appropriate variant is enforced by
-/// the `Axes → Results` table in §3.3.
 fn render(results: &Results) -> Element<'_, Message> {
-    // `Results` is `#[non_exhaustive]` so downstream matches need a wildcard;
-    // the four variants below cover v0.1's full surface.
+    // `Results` is `#[non_exhaustive]`, hence the wildcard arm.
     match results {
         Results::Scalar(r) => render_scalar(r),
         Results::Series(r) => render_series(r),
@@ -70,8 +58,6 @@ fn render_scalar(r: &scalar::Result) -> Element<'_, Message> {
 }
 
 fn render_series(r: &series::Result) -> Element<'_, Message> {
-    // Minimal: two-column text grid (x-axis members on the left, each row's
-    // values on the right). Real dashboards swap in a hyozu line chart.
     let header = row![
         text("").width(Length::FillPortion(2)),
         text("value").font(BOLD).width(Length::FillPortion(3)),
@@ -88,16 +74,14 @@ fn render_series(r: &series::Result) -> Element<'_, Message> {
         .into()
 }
 
-/// A pre-formatted pivot row. Cells are pre-stringified so the column
-/// closures are pure indexed lookups. `Clone` is required by
-/// `sweeten::widget::table` — cheap since all fields are `String`.
+/// Pre-formatted pivot row. Cells are stringified up-front so the
+/// column closures are pure indexed lookups. `Clone` is required by
+/// `sweeten::widget::table` — cheap since every field is a `String`.
 ///
-/// `header_member` carries the *schema-bound* [`MemberRef`] behind the
-/// stringified `header`, so the drill-down button can emit
-/// [`Message::DrillInto`] without the widget layer ever parsing names.
-/// `None` only when a pivot row has zero members in its row tuple, which
-/// the backend does not currently produce — but we stay defensive and
-/// render a plain label in that case.
+/// `header_member` carries the schema-bound [`MemberRef`] behind the
+/// stringified header so the drill button emits [`Message::DrillInto`]
+/// without the widget layer parsing names. `None` covers the
+/// never-seen-in-practice zero-member row tuple.
 #[derive(Clone)]
 struct PivotRow {
     header: String,
@@ -120,14 +104,8 @@ fn render_pivot(r: &pivot::Result) -> Element<'_, Message> {
         })
         .collect();
 
-    // Column 0 — the row header. Wrapped in a text-styled button so a
-    // click emits `Message::DrillInto(member)`. The `button::text` style
-    // drops the border and background so it still reads as a header
-    // cell; alignment stays left-driven by `sweeten::widget::table`'s
-    // default `Alignment::Start` on this column.
-    //
-    // NOTE: Clicking a rollup-tree node is the obvious next iteration —
-    // same pattern (push snapshot, pin member, drill).
+    // Header cell is a `button::text` so clicks drill; the style
+    // strips the border/background so it still reads as a header.
     let header_column = table::column(
         Some(Element::from(text("").font(BOLD))),
         |row: PivotRow| -> Element<'_, Message> {
@@ -143,8 +121,7 @@ fn render_pivot(r: &pivot::Result) -> Element<'_, Message> {
         },
     );
 
-    // One data column per col_header. Each closure captures `i` by copy
-    // and indexes into the pre-formatted `cells` vec.
+    // Closures capture `i` by copy and index into `cells`.
     let mut columns = vec![header_column];
     for (i, col_header) in r.col_headers().iter().enumerate() {
         let label = format_tuple(col_header);
@@ -197,8 +174,6 @@ fn format_cell(cell: &Cell) -> String {
             unit,
             format,
         } => {
-            // Simple: respect `format` for percent, fall back to unit-suffixed number.
-            // A real renderer threads ICU or a format-spec parser.
             if format.as_ref().is_some_and(|f| f.as_str().contains('%')) {
                 format!("{:.1}%", value * 100.0)
             } else if let Some(unit) = unit {
@@ -215,9 +190,8 @@ fn format_cell(cell: &Cell) -> String {
 }
 
 fn format_tuple(t: &Tuple) -> String {
-    // Drop the `Dim=` prefix — the column/row header's position in the
-    // table already tells you which dim it is. Real dashboards swap in
-    // richer header rendering (leading icon, drill affordance, etc.).
+    // Drop the `Dim=` prefix — the header cell's position already
+    // identifies the dim.
     t.members()
         .iter()
         .map(|m| m.path.to_string())
