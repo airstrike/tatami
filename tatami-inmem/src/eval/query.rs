@@ -7,8 +7,15 @@
 //! |---                             |---                                                       |
 //! | `Scalar`                       | `Scalar`                                                 |
 //! | `Series { rows }`              | `Series`                                                 |
-//! | `Pivot { rows, columns }`      | `Pivot` — or `Rollup` when `rows` is a top-level `Descendants` |
+//! | `Pivot { rows, columns }`      | `Pivot` — or `Rollup` when `rows` is a top-level, single-rooted `Descendants` |
 //! | `Pages { rows, columns, pages }` | `Pivot` with stacked column headers (page × column)    |
+//!
+//! "Single-rooted" means the flat `Descendants` output shares one
+//! top-level ancestor (same dim, same hierarchy, same `path[0]`). A
+//! multi-rooted descendants set — e.g. `Set::range(FY2025..FY2030).descendants_to(Quarter)`
+//! spanning six fiscal years — can't fit a single-rooted [`rollup::Tree`]
+//! and falls back to a flat Pivot. Collapsing every root under one
+//! synthetic ancestor would silently drop subtrees (MAP §8 R3).
 //!
 //! ### Shape assembly
 //!
@@ -133,7 +140,14 @@ fn evaluate_series<'s>(
 
 /// `Axes::Pivot { rows, columns }` — rows × columns grid, one cell per
 /// metric per (row, column). If `rows` is structurally a `Descendants`
-/// set, we return a [`Results::Rollup`] tree instead (§3.3 note).
+/// set **and** its flat output shares a single top-level ancestor, we
+/// return a [`Results::Rollup`] tree instead (§3.3 note).
+///
+/// Multi-root descendants — e.g. `Set::range(FY2025..FY2030).descendants_to(Quarter)`
+/// — don't fit a single-rooted [`rollup::Tree`] and fall through to
+/// [`Results::Pivot`]. Collapsing them into one synthetic root would
+/// silently drop every non-first-root's subtree (MAP §8 R3 category);
+/// a flat grid of (quarter × region) is the honest shape.
 fn evaluate_pivot<'s>(
     resolved: &ResolvedQuery<'s>,
     rows: &crate::resolve::ResolvedSet<'s>,
@@ -141,7 +155,14 @@ fn evaluate_pivot<'s>(
     cube: &'s InMemoryCube,
 ) -> Result<Results, Error> {
     if is_descendants(rows) {
-        return evaluate_rollup(resolved, rows, cube);
+        let row_tuples = set::evaluate(rows, cube)?;
+        if let Some(root) = single_root_member(&row_tuples) {
+            return evaluate_rollup(resolved, row_tuples, root, cube);
+        }
+        // Fall through: multi-root `Descendants` produces a flat pivot
+        // with one row per tuple, same as any other set on the rows axis.
+        let col_tuples = set::evaluate(columns, cube)?;
+        return build_pivot(resolved, row_tuples, col_tuples, cube);
     }
     let row_tuples = set::evaluate(rows, cube)?;
     let col_tuples = set::evaluate(columns, cube)?;
@@ -153,6 +174,40 @@ fn evaluate_pivot<'s>(
 /// descends a hierarchy — the tree shape is the natural output.
 fn is_descendants(set: &crate::resolve::ResolvedSet<'_>) -> bool {
     matches!(set, crate::resolve::ResolvedSet::Descendants { .. })
+}
+
+/// If every tuple in `tuples` carries a single member that shares the same
+/// `(dim, hierarchy, path[0])` head, synthesize a [`MemberRef`] at that
+/// single-segment path and return it — the implicit root of the rollup
+/// tree. Returns `None` when the tuples don't share a single top-level
+/// ancestor (multi-root `Descendants` output, cross-joined rows, or a
+/// degenerate empty set).
+fn single_root_member(tuples: &[ResolvedTuple<'_>]) -> Option<MemberRef> {
+    let first = tuples.first()?;
+    let lead = first.members.first()?;
+    let first_segment: &Name = lead.path.segments().next()?;
+    let first_dim = &lead.dim.dim.name;
+    let first_hierarchy = &lead.hierarchy.hierarchy.name;
+    for tuple in tuples {
+        // Rollup trees are single-dim; a cross-joined tuple with multiple
+        // members doesn't fit the shape and falls through to Pivot.
+        if tuple.members.len() != 1 {
+            return None;
+        }
+        let member = &tuple.members[0];
+        let segment = member.path.segments().next()?;
+        if segment != first_segment
+            || &member.dim.dim.name != first_dim
+            || &member.hierarchy.hierarchy.name != first_hierarchy
+        {
+            return None;
+        }
+    }
+    Some(MemberRef::new(
+        first_dim.clone(),
+        first_hierarchy.clone(),
+        tatami::query::Path::of(first_segment.clone()),
+    ))
 }
 
 /// `Axes::Pages { rows, columns, pages }` — v0.1 collapses pages onto the
@@ -231,19 +286,25 @@ fn build_pivot<'s>(
     )))
 }
 
-/// `Axes::Pivot { rows: Descendants, … }` → [`Results::Rollup`]. The flat
-/// row tuples from set evaluation carry `Path`s that encode the tree;
-/// we reassemble the tree by shared path prefix.
+/// `Axes::Pivot { rows: Descendants, … }` with a single-rooted row set →
+/// [`Results::Rollup`]. The flat row tuples from set evaluation carry
+/// [`tatami::query::Path`]s that encode the tree; we reassemble it by
+/// shared path prefix rooted at the synthesized ancestor member.
+///
+/// The caller is responsible for guaranteeing the tuples share a single
+/// top-level ancestor (see [`single_root_member`]); multi-root descendants
+/// fall through to [`build_pivot`] instead so we don't collapse multiple
+/// subtrees under one root (a silent-wrong-answer bug, MAP §8 R3).
 ///
 /// Multi-metric rollup is v0.2; v0.1 uses the first metric for every
 /// node's `value` cell. `columns` is ignored — a rollup tree has no
 /// column axis by shape.
 fn evaluate_rollup<'s>(
     resolved: &ResolvedQuery<'s>,
-    rows: &crate::resolve::ResolvedSet<'s>,
+    row_tuples: Vec<ResolvedTuple<'s>>,
+    root_ref: MemberRef,
     cube: &'s InMemoryCube,
 ) -> Result<Results, Error> {
-    let row_tuples = set::evaluate(rows, cube)?;
     let primary = resolved
         .metrics
         .first()
@@ -251,9 +312,18 @@ fn evaluate_rollup<'s>(
             reason: "Rollup requires at least one metric",
         })?;
 
+    // Evaluate the primary metric at the root itself. The descendants set
+    // doesn't include its own source member, so we compute the root cell
+    // explicitly — pinning the slicer × the synthesized root member.
+    let root_member = synthesize_root_member(&row_tuples, &root_ref)?;
+    let root_tuple = ResolvedTuple::from_members(vec![root_member]);
+    let merged_root = merge(&resolved.slicer, &root_tuple);
+    let root_cell = evaluate_metric(primary, &merged_root, cube)?;
+
     // Walk each flat tuple, evaluate the primary metric, collect
-    // (member_ref, cell) pairs.
-    let mut nodes: Vec<(MemberRef, Cell)> = Vec::with_capacity(row_tuples.len());
+    // (member_ref, cell) pairs. These are the descendants that slot under
+    // the synthesized root.
+    let mut descendants: Vec<(MemberRef, Cell)> = Vec::with_capacity(row_tuples.len());
     for row_tuple in &row_tuples {
         let merged = merge(&resolved.slicer, row_tuple);
         let cell = evaluate_metric(primary, &merged, cube)?;
@@ -263,40 +333,41 @@ fn evaluate_rollup<'s>(
             .ok_or(Error::EvalSetCompositionIllFormed {
                 reason: "Rollup row tuple has no members",
             })?;
-        nodes.push((member_ref_of(first_member), cell));
+        descendants.push((member_ref_of(first_member), cell));
     }
 
-    let tree = assemble_rollup(nodes);
+    let tree = assemble_rollup(root_ref, root_cell, descendants);
     Ok(Results::Rollup(tree))
 }
 
-/// Assemble a flat list of `(MemberRef, Cell)` pairs — sorted pre-order by
-/// the catalogue — into a [`rollup::Tree`] by walking path prefixes.
-///
-/// The flat list is guaranteed non-empty by the caller (`evaluate_rollup`
-/// errors on an empty rows axis). The root is the first node; subsequent
-/// nodes whose paths start with the root's path become descendants.
-fn assemble_rollup(mut nodes: Vec<(MemberRef, Cell)>) -> rollup::Tree {
-    if nodes.is_empty() {
-        // Defensive: produce a synthetic empty root so the caller gets a
-        // valid tree shape rather than a crash.
-        return rollup::Tree {
-            root: MemberRef::new(
-                Name::parse("rollup").expect("literal name"),
-                Name::parse("Default").expect("literal name"),
-                tatami::query::Path::of(Name::parse("empty").expect("literal name")),
-            ),
-            value: Cell::Missing {
-                reason: tatami::missing::Reason::NoFacts,
-            },
-            children: Vec::new(),
-        };
-    }
+/// Rebuild a [`crate::resolve::ResolvedMember`] at the `root_ref`'s
+/// single-segment path, borrowing dim/hierarchy handles from the first row
+/// tuple's member. The caller guarantees `row_tuples` is non-empty and
+/// its tuples share a single-dim, single-hierarchy head (enforced by
+/// [`single_root_member`]).
+fn synthesize_root_member<'s>(
+    row_tuples: &[ResolvedTuple<'s>],
+    root_ref: &MemberRef,
+) -> Result<ResolvedMember<'s>, Error> {
+    let lead = row_tuples.first().and_then(|t| t.members.first()).ok_or(
+        Error::EvalSetCompositionIllFormed {
+            reason: "Rollup row set is empty",
+        },
+    )?;
+    Ok(ResolvedMember {
+        dim: lead.dim,
+        hierarchy: lead.hierarchy,
+        path: root_ref.path.clone(),
+    })
+}
 
-    // The first node is the rollup's root — the Descendants set's source
-    // member. Everything else is a descendant and slots in by path length
-    // relative to the root.
-    let (root_ref, root_cell) = nodes.remove(0);
+/// Assemble the rollup tree: start at the synthesized root with its
+/// pre-computed cell, then slot every descendant under it by path prefix.
+fn assemble_rollup(
+    root_ref: MemberRef,
+    root_cell: Cell,
+    descendants: Vec<(MemberRef, Cell)>,
+) -> rollup::Tree {
     let root_depth = root_ref.path.len();
     let mut root = rollup::Tree {
         root: root_ref,
@@ -304,15 +375,11 @@ fn assemble_rollup(mut nodes: Vec<(MemberRef, Cell)>) -> rollup::Tree {
         children: Vec::new(),
     };
 
-    // A stack of mutable tree pointers, indexed by depth (depth =
-    // `path.len()` relative to the catalogue). The root lives at index 0;
-    // children are pushed at deeper indexes.
-    //
     // Since we can't keep simultaneous `&mut` pointers into the tree in
     // Rust without unsafe, the classic workaround is "insert by path": for
     // each incoming node, walk from the root down through `tree.children`
     // matching each prefix segment, creating missing intermediates.
-    for (mref, cell) in nodes {
+    for (mref, cell) in descendants {
         insert_by_path(&mut root, root_depth, &mref, cell);
     }
 
@@ -732,7 +799,7 @@ mod tests {
     }
 
     #[test]
-    fn pivot_with_descendants_rows_returns_rollup_tree() {
+    fn pivot_with_descendants_of_single_member_returns_rollup() {
         // 3-level geography so Descendants(World, to=Country) spans
         // Region + Country — enough depth for a real tree. Region-level
         // source with to_level=Country would only produce the leaves, no
@@ -757,8 +824,9 @@ mod tests {
         }
         .expect("frame");
         let cube = InMemoryCube::new(df, schema).expect("cube");
-        // §3.3 rule: Pivot with `rows = Descendants` → Results::Rollup.
-        // The columns axis is ignored by the rollup branch.
+        // §3.3 rule: Pivot with `rows = Descendants` of a single-rooted set
+        // → Results::Rollup. The columns axis is ignored by the rollup
+        // branch.
         let q = Query {
             axes: Axes::Pivot {
                 rows: Set::explicit(vec![mr("Geography", "Default", &["World"])])
@@ -773,16 +841,84 @@ mod tests {
         let r = run_query(&cube, q);
         match r {
             Results::Rollup(tree) => {
-                // Root = first descendant in pre-order at Region level =
-                // APAC. APAC has 1 country (JP) below. The tree must have
-                // at least one child (APAC → JP, or the EMEA subtree
-                // adjacent).
-                assert!(
-                    !tree.children.is_empty(),
-                    "rollup tree must have descendants, got {tree:?}"
+                // Root = the synthesized World member at depth 1; two
+                // regions sit as direct children (APAC, EMEA — sorted
+                // pre-order by the catalogue), each with its country
+                // children.
+                assert_eq!(
+                    tree.root.path.segments().collect::<Vec<_>>().len(),
+                    1,
+                    "root is the synthesized ancestor, not a descendant leaf"
+                );
+                assert_eq!(
+                    tree.children.len(),
+                    2,
+                    "two regions hang off the World root, got {tree:?}"
                 );
             }
             other => panic!("expected Rollup, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn pivot_with_descendants_of_range_returns_pivot_not_rollup() {
+        // Multi-root `Set::range(Y1..Y2).descendants_to(Quarter)`: the
+        // flat output has multiple top-level path[0]s (one per year) and
+        // therefore can't fit a single-rooted `rollup::Tree`. Expect a
+        // flat Pivot with one row per (year, quarter) tuple. Today's
+        // single-rooted assembler would collapse every non-first-year
+        // quarter under the first year's subtree — the silent-wrong-answer
+        // shape (MAP §8 R3).
+        let schema = Schema::builder()
+            .dimension(
+                Dimension::time(
+                    n("Time"),
+                    vec![tatami::schema::Calendar::gregorian(n("Gregorian"))],
+                )
+                .hierarchy(
+                    Hierarchy::new(n("Fiscal"))
+                        .level(Level::new(n("Year"), n("year")))
+                        .level(Level::new(n("Quarter"), n("quarter"))),
+                ),
+            )
+            .measure(Measure::new(n("amount"), Aggregation::sum()))
+            .build()
+            .expect("schema");
+        let df: DataFrame = df! {
+            "year"    => ["FY2025", "FY2025", "FY2026", "FY2026"],
+            "quarter" => ["Q1",     "Q2",     "Q1",     "Q2"],
+            "amount"  => [10.0_f64, 20.0,     30.0,     40.0],
+        }
+        .expect("frame");
+        let cube = InMemoryCube::new(df, schema).expect("cube");
+        let q = Query {
+            axes: Axes::Pivot {
+                rows: Set::range(
+                    n("Time"),
+                    n("Fiscal"),
+                    mr("Time", "Fiscal", &["FY2025"]),
+                    mr("Time", "Fiscal", &["FY2026"]),
+                )
+                .descendants_to(n("Quarter")),
+                columns: Set::members(n("Time"), n("Fiscal"), n("Year")),
+            },
+            slicer: Tuple::empty(),
+            metrics: vec![n("amount")],
+            options: tatami::query::Options::default(),
+        };
+        let r = run_query(&cube, q);
+        match r {
+            Results::Pivot(p) => {
+                // Two years × two quarters each = four row tuples.
+                assert_eq!(
+                    p.row_headers().len(),
+                    4,
+                    "multi-root descendants produce one row per (year, quarter)"
+                );
+            }
+            other => panic!(
+                "expected Pivot for multi-root Descendants, got {other:?} (rollup would collapse cross-year quarters)"
+            ),
         }
     }
 

@@ -11,13 +11,23 @@
 //!
 //! ## Column matching
 //!
-//! For each bound member, the level to filter on is the one at the
-//! member's path depth — `hierarchy.levels[path.len() - 1]`. The filter
-//! compares the *stringified* cell to the path's leaf segment, consistent
-//! with how [`crate::catalogue`] discovers members at construction time.
-//! This keeps integer-keyed and string-keyed dims behaving the same and
-//! avoids routing the comparison through polars's lazy compare machinery
-//! (which this crate deliberately does not enable — see `CLAUDE.md`).
+//! For each bound member, the filter ANDs one predicate **per level** of
+//! the member's path, from root to leaf. A member pinning `FY2026/Q1/Jan`
+//! produces three predicates (`year == "FY2026"`, `quarter == "Q1"`,
+//! `month == "Jan"`), all combined into the final mask. Leaf-only matching
+//! silently returns rows from other years that happen to share the same
+//! month key — a silent-wrong-answer bug class MAP §8 R3 warns about.
+//!
+//! Each per-level predicate compares the *stringified* cell to the path
+//! segment at that depth, consistent with how [`crate::catalogue`]
+//! discovers members at construction time. This keeps integer-keyed and
+//! string-keyed dims behaving the same and avoids routing the comparison
+//! through polars's lazy compare machinery (which this crate deliberately
+//! does not enable — see `CLAUDE.md`).
+//!
+//! A member whose path is shorter than the hierarchy's depth pins only the
+//! levels the path covers (parent pinning, not leaf pinning) — pinning
+//! `FY2026` alone produces `year == "FY2026"` and nothing deeper.
 #![allow(dead_code)]
 
 use polars_core::prelude::{BooleanChunked, ChunkFull, DataFrame, PlSmallStr};
@@ -29,9 +39,18 @@ use crate::resolve::ResolvedTuple;
 /// resolved tuple.
 ///
 /// An empty tuple returns the frame unchanged (every row is compatible
-/// with the empty coordinate set). For each member, the filter computes
-/// `frame[level_key_col] == leaf_path_segment` (stringwise) and ANDs the
-/// resulting masks row-for-row.
+/// with the empty coordinate set). For each member, the filter ANDs one
+/// `col(level.key) == lit(segment)` predicate per level of the member's
+/// path — root through leaf — so that e.g. pinning `FY2026/Q1/Jan` is
+/// interpreted as "the FY2026 Jan in Q1", not "any row whose `month`
+/// string happens to equal `Jan`".
+///
+/// Paths shorter than the hierarchy depth pin only the levels they cover,
+/// which is the intended "parent pinning" behaviour for ancestor members.
+/// A path longer than the hierarchy depth is rejected at
+/// [`crate::resolve`] (Phase 5c); the defensive branch here surfaces
+/// [`Error::EvalFilterFailed`] rather than panicking if such a tuple ever
+/// reaches eval.
 ///
 /// Returns [`Error::EvalColumnMissing`] if a level key column has vanished
 /// between cube construction and eval (Phase 5a makes this structurally
@@ -49,43 +68,46 @@ pub(crate) fn filter_by_tuple(
     let mut mask = BooleanChunked::full(PlSmallStr::from_static("mask"), true, height);
 
     for member in &tuple.members {
-        // `path.len() >= 1` by construction; the level at depth `len - 1`
-        // is the path's leaf level.
         let depth = member.path.len();
-        let level_index = depth - 1;
-        let level = member
+        let hierarchy_depth = member.hierarchy.hierarchy.levels.len();
+        if depth == 0 || depth > hierarchy_depth {
+            // `Path` is non-empty by construction and 5c caps depth at the
+            // hierarchy's level count; surface a typed error rather than
+            // panic on a hand-built tuple that reached eval.
+            return Err(Error::EvalFilterFailed {
+                reason: format!(
+                    "path depth {} out of range for {}/{} hierarchy (levels: {})",
+                    depth,
+                    member.dim.dim.name.as_str(),
+                    member.hierarchy.hierarchy.name.as_str(),
+                    hierarchy_depth,
+                ),
+            });
+        }
+
+        // AND one predicate per level, root → leaf. Pinning `FY2026/Q1`
+        // covers the first two levels; `FY2026` alone covers only the
+        // first (parent pinning). This is what makes tuple filtering
+        // hierarchically honest — without it, a month key shared across
+        // years would silently match any year.
+        for (level, segment) in member
             .hierarchy
             .hierarchy
             .levels
-            .get(level_index)
-            .ok_or_else(|| Error::EvalColumnMissing {
-                column: format!(
-                    "{}/{} level at depth {}",
-                    member.dim.dim.name.as_str(),
-                    member.hierarchy.hierarchy.name.as_str(),
-                    depth,
-                ),
-            })?;
-        let column_name = level.key.as_str();
-        let column = df
-            .column(column_name)
-            .map_err(|_| Error::EvalColumnMissing {
-                column: column_name.to_owned(),
-            })?;
-        let series = column.as_materialized_series();
-
-        // `member.path.segments()` visits root → leaf; the leaf is the
-        // last segment, and it's what the fact-frame cell must stringify
-        // to at `column_name`.
-        let target = member
-            .path
-            .segments()
-            .last()
-            .expect("path has at least one segment by construction")
-            .as_str();
-
-        let member_mask = column_equals_stringwise(series, target, height);
-        mask = (&mask) & (&member_mask);
+            .iter()
+            .zip(member.path.segments())
+            .take(depth)
+        {
+            let column_name = level.key.as_str();
+            let column = df
+                .column(column_name)
+                .map_err(|_| Error::EvalColumnMissing {
+                    column: column_name.to_owned(),
+                })?;
+            let series = column.as_materialized_series();
+            let level_mask = column_equals_stringwise(series, segment.as_str(), height);
+            mask = (&mask) & (&level_mask);
+        }
     }
 
     df.filter(&mask).map_err(|e| Error::EvalFilterFailed {
@@ -229,10 +251,12 @@ mod tests {
     }
 
     #[test]
-    fn deep_path_filters_on_leaf_level_only() {
+    fn deep_path_ands_every_level_root_to_leaf() {
         let cube = fixture_cube();
         let df = fixture_df();
-        // EMEA/UK → single row.
+        // EMEA/UK → single row. The filter must AND both region == EMEA
+        // and country == UK; the country-only check was the old leaf-only
+        // behaviour (MAP §8 R3).
         let tuple = resolve_slicer(
             &cube,
             Tuple::single(mr("Geography", "Default", &["EMEA", "UK"])),
@@ -283,5 +307,74 @@ mod tests {
         );
         let out = filter_by_tuple(&tuple, &df).expect("filter ok");
         assert_eq!(out.height(), 0);
+    }
+
+    /// Cube + frame with a three-level Time hierarchy, used to demonstrate
+    /// that `filter_by_tuple` ANDs every level of the path — not just the
+    /// leaf. Without the per-level AND, a `Jan` row from FY2025 would
+    /// slip into a filter pinning FY2026/Q1/Jan (MAP §8 R3).
+    fn year_quarter_month_cube_and_frame() -> (InMemoryCube, DataFrame) {
+        use tatami::schema::Calendar;
+        let schema = Schema::builder()
+            .dimension(
+                Dimension::time(n("Time"), vec![Calendar::gregorian(n("Gregorian"))]).hierarchy(
+                    Hierarchy::new(n("Fiscal"))
+                        .level(Level::new(n("Year"), n("year")))
+                        .level(Level::new(n("Quarter"), n("quarter")))
+                        .level(Level::new(n("Month"), n("month"))),
+                ),
+            )
+            .measure(Measure::new(n("amount"), Aggregation::sum()))
+            .build()
+            .expect("schema valid");
+        let df = df! {
+            "year"    => ["FY2025", "FY2026", "FY2025"],
+            "quarter" => ["Q1",     "Q1",     "Q2"],
+            "month"   => ["Jan",    "Jan",    "Apr"],
+            "amount"  => [10.0_f64, 20.0,     30.0],
+        }
+        .expect("frame valid");
+        let cube = InMemoryCube::new(df.clone(), schema).expect("construct three-level time cube");
+        (cube, df)
+    }
+
+    #[test]
+    fn filter_by_tuple_ands_every_level_of_the_path() {
+        // Two rows share `month == "Jan"` but live in different fiscal
+        // years. Pinning FY2026/Q1/Jan must return only the FY2026 row,
+        // not both. The old leaf-only filter returned both (silent wrong
+        // answer — MAP §8 R3).
+        let (cube, df) = year_quarter_month_cube_and_frame();
+        let tuple = resolve_slicer(
+            &cube,
+            Tuple::single(mr("Time", "Fiscal", &["FY2026", "Q1", "Jan"])),
+        );
+        let out = filter_by_tuple(&tuple, &df).expect("filter ok");
+        assert_eq!(
+            out.height(),
+            1,
+            "FY2026/Q1/Jan must not match FY2025/Q1/Jan"
+        );
+        let amount = out
+            .column("amount")
+            .expect("amount col")
+            .as_materialized_series();
+        assert_eq!(amount.get(0).expect("cell").to_string(), "20.0");
+    }
+
+    #[test]
+    fn filter_by_tuple_on_partial_path_pins_only_those_levels() {
+        // Pinning just `FY2026` (depth 1 under a 3-level hierarchy) must
+        // keep every FY2026 row across quarters / months. No deeper levels
+        // should be constrained.
+        let (cube, df) = year_quarter_month_cube_and_frame();
+        let tuple = resolve_slicer(&cube, Tuple::single(mr("Time", "Fiscal", &["FY2026"])));
+        let out = filter_by_tuple(&tuple, &df).expect("filter ok");
+        assert_eq!(out.height(), 1, "only the one FY2026 row survives");
+
+        // And pinning just FY2025 keeps both FY2025 rows (Q1/Jan and Q2/Apr).
+        let tuple = resolve_slicer(&cube, Tuple::single(mr("Time", "Fiscal", &["FY2025"])));
+        let out = filter_by_tuple(&tuple, &df).expect("filter ok");
+        assert_eq!(out.height(), 2, "both FY2025 rows survive partial pin");
     }
 }

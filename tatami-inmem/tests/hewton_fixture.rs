@@ -376,11 +376,13 @@ async fn fy2026_revenue_scalar_returns_expected_total() {
 #[tokio::test]
 async fn quarterly_revenue_by_region_pivot_returns_grid() {
     // §3.5(b)-shaped: a single Time root drilled via
-    // `descendants_to(Month)` — rollup assembly anchors on a single
-    // in-set root and nests the rest by path prefix, producing a real
-    // Year → Quarter → Month tree. (Multi-root Range sources collapse
-    // the tree under the current single-root assembler; see §5 notes in
-    // the Phase 5h report.)
+    // `descendants_to(Month)` — single-rooted, so the rollup path fires.
+    // The evaluator synthesizes the FY2026 root and nests the quarters /
+    // months by path prefix, producing a real Year → Quarter → Month
+    // tree. Multi-root Range sources (e.g. FY2025–FY2030) fall through to
+    // a flat Pivot instead, deliberately — see the inline
+    // `pivot_with_descendants_of_range_returns_pivot_not_rollup` test in
+    // `eval::query` for the discriminator.
     let cube = fixture::cube();
     let q = Query {
         axes: Axes::Pivot {
