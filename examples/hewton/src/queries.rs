@@ -43,7 +43,7 @@ impl ExampleQuery {
             Self::FyRevenue => "Single-cell KPI with MoM delta — Results::Scalar",
             Self::QuarterlyByRegion => "FY2025–FY2030 × regions — Results::Pivot",
             Self::PlanVsWhatIf => "Variance table across scenarios — Results::Pivot",
-            Self::WorldToCountry => "World → Region → Country drilldown — Results::Series",
+            Self::WorldToCountry => "World → Region → Country drilldown — Results::Rollup",
         }
     }
 
@@ -120,21 +120,22 @@ fn variance_pivot() -> Query {
     }
 }
 
-// ── §3.5(d) Series — descendants of a member along an axis ─────────────────
+// ── §3.5(d) Rollup — Descendants rows + single-column Pivot ────────────────
 
 fn rollup_by_territory(scenario: Scenario) -> Query {
+    // Pivot-with-Descendants-rows hits the rollup trigger in
+    // eval/query.rs::evaluate_pivot: a single-root Descendants set
+    // collapses to `Results::Rollup(Tree)` rather than a flat pivot grid.
+    // The active scenario moves from the slicer onto the columns axis so
+    // the picker still parameterises the query without clashing with the
+    // slicer's dim set.
     Query {
-        axes: Axes::Series {
-            // MemberRef → Set sugar: `.descendants_to(level)` wraps the
-            // member in Set::Explicit automatically. Reads as
-            // `world.descendants_to("Country")`.
+        axes: Axes::Pivot {
             rows: MemberRef::world().descendants_to(n("Country")),
+            columns: Set::explicit([MemberRef::scenario(n(scenario.name()))])
+                .expect("single-scenario column is non-empty"),
         },
-        slicer: Tuple::of([
-            MemberRef::time(n("FY2026")),
-            MemberRef::scenario(n(scenario.name())),
-        ])
-        .expect("distinct dims"),
+        slicer: Tuple::of([MemberRef::time(n("FY2026"))]).expect("distinct dims"),
         metrics: vec![n("room_nights_sold")],
         options: query::Options::default(),
     }
