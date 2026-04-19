@@ -24,11 +24,11 @@ use std::fmt;
 use std::num::NonZeroUsize;
 use std::sync::Arc;
 
-use iced::widget::{Column, button, center, column, pick_list, row, scrollable, text};
+use iced::widget::{Column, button, center, column, pick_list, row, scrollable, text, text_input};
 use iced::{Alignment, Element, Font, Length, Task, Theme, font};
 
 use polars_core::prelude::DataFrame;
-use tatami::query::{self, MemberRef, Set, Tuple};
+use tatami::query::{self, MemberRef, Predicate, Set, Tuple};
 use tatami::schema::{Name, Schema};
 use tatami::{Axes, Cube, Query, Results};
 use tatami_inmem::InMemoryCube;
@@ -84,6 +84,32 @@ struct App {
     /// axis is absent; the user will see the rows picker light up first.
     top_n_by: Option<MetricPick>,
 
+    /// When all three filter fields are valid, [`build_query`] wraps the
+    /// rows axis in `Set::filter(pred)` using [`build_predicate`]. Unlike
+    /// Top-N, Filter makes sense on any axis shape, including Scalar —
+    /// though this implementation only wraps the rows set when rows are
+    /// present. `Predicate::In` / `NotIn` are deferred; only numeric
+    /// Eq / Gt / Lt.
+    filter: Option<FilterPick>,
+
+    /// Scratch "kind" picker state. `None` means the filter is Off.
+    /// Once all three scratch fields (`filter_kind`, `filter_by`, and a
+    /// parseable `filter_value_text`) are populated, [`App::recompute_filter`]
+    /// composes them into `self.filter` and the query wraps the rows axis.
+    filter_kind: Option<FilterKind>,
+
+    /// Scratch "by-metric" picker state — which metric the comparator
+    /// reads. `None` means no metric is picked; the filter won't apply.
+    filter_by: Option<MetricPick>,
+
+    /// Scratch state for the filter-value `text_input` — the string the
+    /// user is typing, before it parses to `f64`. Holding it out-of-band
+    /// means a partial input like "12." mid-typing doesn't blow up the
+    /// query: [`App::recompute_filter`] only materializes `self.filter`
+    /// when `parse::<f64>()` succeeds, and the widget keeps showing
+    /// whatever the user typed regardless.
+    filter_value_text: String,
+
     /// Pinned members for dims *not currently on an axis*. Keyed by dim
     /// index into `schema.dimensions`. Entries are pruned when the user
     /// moves the same dim onto an axis — a dim can be "on rows" or "in the
@@ -127,6 +153,44 @@ enum MetricPick {
     Measure(usize),
     /// Index into `schema.metrics`.
     Metric(usize),
+}
+
+/// Three-way numeric predicate picker. `Predicate::In` / `NotIn` are
+/// deferred to a later iteration — picking a `Path` prefix is its own
+/// UI project (a Path picker with hierarchy-aware drill-down).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[non_exhaustive]
+enum FilterKind {
+    /// `metric == value`.
+    #[default]
+    Eq,
+    /// `metric > value`.
+    Gt,
+    /// `metric < value`.
+    Lt,
+}
+
+impl fmt::Display for FilterKind {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(match self {
+            FilterKind::Eq => "=",
+            FilterKind::Gt => ">",
+            FilterKind::Lt => "<",
+        })
+    }
+}
+
+/// A numeric filter on the rows axis. When present in [`App::filter`],
+/// `build_query` wraps the rows set in `Set::filter(pred)` using
+/// [`build_predicate`] to translate into a [`Predicate`].
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct FilterPick {
+    /// Which comparator to apply.
+    kind: FilterKind,
+    /// Metric whose value the comparator reads.
+    by: MetricPick,
+    /// Right-hand side of the comparator.
+    value: f64,
 }
 
 /// The most recent query outcome. Picker changes eagerly kick the state
@@ -177,6 +241,18 @@ enum Message {
     MetricSlotRemoved(usize),
     /// Top-N by-metric picker changed. `None` turns Top-N off.
     TopNByPicked(Option<MetricChoice>),
+    /// Filter kind picker changed. `None` turns the filter off — the
+    /// other filter controls get disabled / cleared to match.
+    FilterKindPicked(Option<FilterKind>),
+    /// Filter by-metric picker changed. `None` clears the by-metric —
+    /// the filter stays kind-picked but won't apply until a metric is
+    /// picked again.
+    FilterByPicked(Option<MetricChoice>),
+    /// Raw keystroke from the filter-value `text_input`. Stored in
+    /// `filter_value_text`; parsed to `f64` on every change to update
+    /// `filter.value`. Invalid / partial input leaves the last valid
+    /// value in place so the query doesn't thrash while typing.
+    FilterValueChanged(String),
     /// Per-dim top-level members loaded via
     /// [`InMemoryCube::level_members`]. `usize` is the dim's index into
     /// `schema.dimensions`; on error the string is the backend message.
@@ -228,6 +304,24 @@ impl fmt::Display for MetricChoice {
     }
 }
 
+/// A filter-kind option in a pick_list — wraps [`FilterKind`] with an
+/// explicit `Off` entry so "turn the filter off" is a visible option in
+/// the list, not a "clear" button on the side.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum FilterKindChoice {
+    Off,
+    On(FilterKind),
+}
+
+impl fmt::Display for FilterKindChoice {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            FilterKindChoice::Off => f.write_str("(off)"),
+            FilterKindChoice::On(k) => write!(f, "{k}"),
+        }
+    }
+}
+
 /// A slicer option in a pick_list — a single top-level member of a dim
 /// *not currently on an axis*. Pinning seeds `Query.slicer` with this
 /// member; unpinning removes the dim from the slicer tuple.
@@ -263,6 +357,10 @@ impl App {
             // `SchemaReady`.
             metrics: Vec::new(),
             top_n_by: None,
+            filter: None,
+            filter_kind: None,
+            filter_by: None,
+            filter_value_text: String::new(),
             slicer: HashMap::new(),
             slicer_options: HashMap::new(),
             result: QueryState::Idle,
@@ -374,6 +472,28 @@ impl App {
                 self.top_n_by = choice.map(|c| c.pick);
                 self.run_query()
             }
+            Message::FilterKindPicked(kind) => {
+                self.filter_kind = kind;
+                if kind.is_none() {
+                    // Off: also clear the by/value scratch so re-enabling
+                    // the filter starts fresh rather than snapping to a
+                    // surprise state.
+                    self.filter_by = None;
+                    self.filter_value_text.clear();
+                }
+                self.recompute_filter();
+                self.run_query()
+            }
+            Message::FilterByPicked(choice) => {
+                self.filter_by = choice.map(|c| c.pick);
+                self.recompute_filter();
+                self.run_query()
+            }
+            Message::FilterValueChanged(raw) => {
+                self.filter_value_text = raw;
+                self.recompute_filter();
+                self.run_query()
+            }
             Message::SlicerMembersLoaded(dim_index, Ok(members)) => {
                 self.slicer_options.insert(dim_index, members);
                 Task::none()
@@ -415,6 +535,9 @@ impl App {
                     &self.columns,
                     &self.metrics,
                     self.top_n_by,
+                    self.filter_kind,
+                    self.filter_by,
+                    &self.filter_value_text,
                     &self.slicer,
                     &self.slicer_options,
                 ),
@@ -443,6 +566,7 @@ impl App {
             &self.metrics,
             &self.slicer,
             self.top_n_by,
+            self.filter.as_ref(),
         ) else {
             self.result = QueryState::Idle;
             return Task::none();
@@ -461,6 +585,24 @@ impl App {
         self.slicer
             .retain(|dim_index, _| !on_axis.contains(dim_index));
     }
+
+    /// Materialize `self.filter` from the three scratch fields. Only
+    /// produces `Some` when kind is On, by-metric is picked, and the
+    /// value text parses to `f64`. Otherwise leaves `self.filter = None`
+    /// so `build_query` skips the filter wrap.
+    fn recompute_filter(&mut self) {
+        let value = match self.filter_value_text.parse::<f64>() {
+            Ok(v) => v,
+            Err(_) => {
+                self.filter = None;
+                return;
+            }
+        };
+        self.filter = match (self.filter_kind, self.filter_by) {
+            (Some(kind), Some(by)) => Some(FilterPick { kind, by, value }),
+            _ => None,
+        };
+    }
 }
 
 // ── Sidebar pickers ────────────────────────────────────────────────────────
@@ -475,6 +617,9 @@ fn sidebar<'a>(
     columns: &AxisPick,
     metrics: &[Option<MetricPick>],
     top_n_by: Option<MetricPick>,
+    filter_kind: Option<FilterKind>,
+    filter_by: Option<MetricPick>,
+    filter_value_text: &str,
     slicer: &HashMap<usize, MemberRef>,
     slicer_options: &HashMap<usize, Vec<MemberRef>>,
 ) -> Element<'a, Message> {
@@ -533,6 +678,7 @@ fn sidebar<'a>(
 
     let metric_block = metric_panel(metrics, &metric_options);
     let top_n_block = top_n_panel(rows, top_n_by, &metric_options);
+    let filter_block = filter_panel(filter_kind, filter_by, filter_value_text, &metric_options);
 
     let slicer_block = slicer_panel(schema, rows, columns, slicer, slicer_options);
 
@@ -541,6 +687,7 @@ fn sidebar<'a>(
         columns_block,
         metric_block,
         top_n_block,
+        filter_block,
         slicer_block
     ]
     .spacing(16)
@@ -633,6 +780,79 @@ fn top_n_panel<'a>(
     ]
     .spacing(4)
     .into()
+}
+
+/// Build the Filter panel. Three stacked controls: a kind picker
+/// (Off / = / > / <), a by-metric picker, and a `text_input` for the
+/// numeric threshold. When kind is Off, the by / value controls collapse
+/// to a hint line so the common "filter not in use" case stays quiet.
+/// `Predicate::In` / `NotIn` are deferred until a Path picker lands.
+fn filter_panel<'a>(
+    filter_kind: Option<FilterKind>,
+    filter_by: Option<MetricPick>,
+    filter_value_text: &str,
+    metric_options: &[MetricChoice],
+) -> Element<'a, Message> {
+    let heading = text("Filter").size(13);
+
+    let kind_options = vec![
+        FilterKindChoice::Off,
+        FilterKindChoice::On(FilterKind::Eq),
+        FilterKindChoice::On(FilterKind::Gt),
+        FilterKindChoice::On(FilterKind::Lt),
+    ];
+    let selected_kind = match filter_kind {
+        None => Some(FilterKindChoice::Off),
+        Some(k) => Some(FilterKindChoice::On(k)),
+    };
+    let kind_picker = pick_list(selected_kind, kind_options, |c: &FilterKindChoice| {
+        c.to_string()
+    })
+    .on_select(|c: FilterKindChoice| {
+        Message::FilterKindPicked(match c {
+            FilterKindChoice::Off => None,
+            FilterKindChoice::On(k) => Some(k),
+        })
+    })
+    .width(Length::Fill);
+
+    if filter_kind.is_none() {
+        return column![
+            heading,
+            kind_picker,
+            text("(filter off)").size(12).style(text::secondary),
+        ]
+        .spacing(6)
+        .into();
+    }
+
+    let by_options = metric_options.to_vec();
+    let selected_by =
+        filter_by.and_then(|pick| metric_options.iter().find(|c| c.pick == pick).cloned());
+    let by_picker = pick_list(selected_by, by_options, |c: &MetricChoice| c.label.clone())
+        .on_select(|c: MetricChoice| Message::FilterByPicked(Some(c)))
+        .placeholder("(pick a metric)")
+        .width(Length::Fill);
+
+    let value_input = text_input("(value)", filter_value_text)
+        .on_input(Message::FilterValueChanged)
+        .width(Length::Fill);
+
+    // Hint line when the three inputs aren't all valid yet — makes it
+    // obvious to the user why the query hasn't re-fired after typing.
+    let ready = filter_by.is_some() && filter_value_text.parse::<f64>().is_ok();
+    let status: Element<'_, Message> = if ready {
+        text("").into()
+    } else {
+        text("(pick metric + numeric value)")
+            .size(12)
+            .style(text::secondary)
+            .into()
+    };
+
+    column![heading, kind_picker, by_picker, value_input, status]
+        .spacing(6)
+        .into()
 }
 
 /// Build the slicer shelf — one picker per dim *not* currently on rows or
@@ -894,6 +1114,27 @@ fn metric_name(schema: &Schema, pick: MetricPick) -> Option<Name> {
     }
 }
 
+/// Translate a [`FilterPick`] into a [`Predicate`]. Only the numeric
+/// comparators (Eq / Gt / Lt) are in scope for v1 — the `Predicate::In` /
+/// `NotIn` variants need a `Path` picker UI which is its own project.
+fn build_predicate(schema: &Schema, filter: &FilterPick) -> Option<Predicate> {
+    let metric = metric_name(schema, filter.by)?;
+    Some(match filter.kind {
+        FilterKind::Eq => Predicate::Eq {
+            metric,
+            value: filter.value,
+        },
+        FilterKind::Gt => Predicate::Gt {
+            metric,
+            value: filter.value,
+        },
+        FilterKind::Lt => Predicate::Lt {
+            metric,
+            value: filter.value,
+        },
+    })
+}
+
 fn build_query(
     schema: &Schema,
     rows: &AxisPick,
@@ -901,6 +1142,7 @@ fn build_query(
     metrics: &[Option<MetricPick>],
     slicer: &HashMap<usize, MemberRef>,
     top_n_by: Option<MetricPick>,
+    filter: Option<&FilterPick>,
 ) -> Option<Query> {
     // Any empty slot blocks the query — including the single seeded slot
     // at boot, so the panel shows the Idle placeholder until the user
@@ -915,6 +1157,26 @@ fn build_query(
         .collect::<Option<Vec<_>>>()?;
 
     let mut axes = build_axes(schema, rows, columns)?;
+
+    // Wrap the rows axis in `Set::filter` *before* Top-N so the natural
+    // reading order holds: "of rows where revenue > 1M, take the top 10
+    // by revenue". Applying filter first also keeps the rank stable
+    // under filter changes — Top-N ranks what's left. Filter is
+    // Predicate::Eq/Gt/Lt only; Predicate::In / NotIn are deferred until
+    // a Path picker lands.
+    if let Some(f) = filter {
+        let pred = build_predicate(schema, f)?;
+        axes = match axes {
+            Axes::Series { rows } => Axes::Series {
+                rows: rows.filter(pred),
+            },
+            Axes::Pivot { rows, columns } => Axes::Pivot {
+                rows: rows.filter(pred),
+                columns,
+            },
+            other => other,
+        };
+    }
 
     // Wrap the rows axis in `Set::top` when the user has enabled Top-N
     // and a rows axis exists. Scalar / Pages have no rows to top; the
