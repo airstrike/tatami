@@ -1,28 +1,41 @@
-//! Set evaluation — Phase 5d of MAP_PLAN.md §5.
+//! Set evaluation — Phase 5d (base variants) + Phase 5g (Filter / TopN).
 //!
 //! Walks a `ResolvedSet` and materialises every tuple it denotes against
-//! the in-memory member catalogue. No fact-frame access yet; Phase 5e-g
-//! graft tuple / metric evaluation and query assembly on top of what this
-//! module produces.
+//! the cube's member catalogue and metric evaluator. Phase 5d landed every
+//! variant except `Filter` and `TopN`, which need the metric evaluator
+//! (Phase 5f) to score each candidate tuple. Phase 5g wires that in.
 //!
-//! The `Filter` and `TopN` variants both depend on metric evaluation
-//! (Phase 5f) and are surfaced as typed errors — `FilterDeferredToMetricEval`
-//! and `TopNDeferredToMetricEval` — so the phase-boundary is explicit
-//! rather than silently empty. Phase 5g lifts both short-circuits.
+//! ### `Filter`
 //!
-//! The module-scoped `allow(dead_code)` matches the pattern used by
-//! `resolve.rs`: evaluation entry points are consumed by Phase 5g's
-//! `Cube::query` wiring, and the tests in this file exercise them until
-//! that call site lands.
+//! Each source tuple is scored against the predicate. For metric-bearing
+//! predicates (`Eq`, `Gt`, `Lt`) the tuple passes iff the metric at that
+//! tuple yields a [`Cell::Valid`] whose value satisfies the comparison —
+//! [`Cell::Missing`] and [`Cell::Error`] are treated as false, which keeps
+//! the filter conservative. For path-bearing predicates (`In`, `NotIn`)
+//! the tuple's member on the named dim is compared against the prefix.
+//!
+//! ### `TopN`
+//!
+//! Each source tuple is scored against the ranking metric. `Valid` cells
+//! contribute their value; `Missing` / `Error` cells score
+//! [`f64::NEG_INFINITY`] (sink to the bottom deterministically). The
+//! highest `n` scores survive; ties are broken by the source tuple's
+//! pre-order position so the output is stable.
+//!
+//! [`Cell::Valid`]: tatami::Cell::Valid
+//! [`Cell::Missing`]: tatami::Cell::Missing
+//! [`Cell::Error`]: tatami::Cell::Error
 #![allow(dead_code)]
 
 use std::collections::HashSet;
 
-use tatami::MemberRelation;
+use tatami::schema::Name;
+use tatami::{Cell, MemberRelation};
 
 use crate::Error;
-use crate::catalogue::Catalogue;
-use crate::resolve::{ResolvedMember, ResolvedSet, ResolvedTuple};
+use crate::InMemoryCube;
+use crate::eval::metric::evaluate_expr;
+use crate::resolve::{MetricHandle, ResolvedMember, ResolvedPredicate, ResolvedSet, ResolvedTuple};
 
 /// Evaluate a resolved set into the concrete list of tuples it denotes.
 ///
@@ -33,8 +46,9 @@ use crate::resolve::{ResolvedMember, ResolvedSet, ResolvedTuple};
 /// dedup — callers asked for exactly the list they passed.
 pub(crate) fn evaluate<'s>(
     set: &ResolvedSet<'s>,
-    catalogue: &'s Catalogue,
+    cube: &'s InMemoryCube,
 ) -> Result<Vec<ResolvedTuple<'s>>, Error> {
+    let catalogue = cube.catalogue();
     match set {
         ResolvedSet::Members {
             dim,
@@ -102,7 +116,7 @@ pub(crate) fn evaluate<'s>(
             Ok(tuples)
         }
 
-        ResolvedSet::Named { set } => evaluate(set, catalogue),
+        ResolvedSet::Named { set } => evaluate(set, cube),
 
         ResolvedSet::Explicit { members } => {
             // `Set::explicit` already rejected an empty member list, so no
@@ -117,7 +131,7 @@ pub(crate) fn evaluate<'s>(
         }
 
         ResolvedSet::Children { of } => {
-            let parents = evaluate(of, catalogue)?;
+            let parents = evaluate(of, cube)?;
             let mut out: Vec<ResolvedTuple> = Vec::new();
             let mut seen: HashSet<ResolvedTuple> = HashSet::new();
             for parent in parents {
@@ -143,7 +157,7 @@ pub(crate) fn evaluate<'s>(
         }
 
         ResolvedSet::Descendants { of, to_level } => {
-            let sources = evaluate(of, catalogue)?;
+            let sources = evaluate(of, cube)?;
             let mut out: Vec<ResolvedTuple> = Vec::new();
             let mut seen: HashSet<ResolvedTuple> = HashSet::new();
             for source in sources {
@@ -187,8 +201,8 @@ pub(crate) fn evaluate<'s>(
         }
 
         ResolvedSet::CrossJoin { left, right } => {
-            let ls = evaluate(left, catalogue)?;
-            let rs = evaluate(right, catalogue)?;
+            let ls = evaluate(left, cube)?;
+            let rs = evaluate(right, cube)?;
             let mut out = Vec::with_capacity(ls.len().saturating_mul(rs.len()));
             for l in &ls {
                 for r in &rs {
@@ -199,14 +213,159 @@ pub(crate) fn evaluate<'s>(
         }
 
         ResolvedSet::Union { left, right } => {
-            let mut out = evaluate(left, catalogue)?;
-            out.extend(evaluate(right, catalogue)?);
+            let mut out = evaluate(left, cube)?;
+            out.extend(evaluate(right, cube)?);
             Ok(dedup_preserving_order(out))
         }
 
-        ResolvedSet::Filter { .. } => Err(Error::FilterDeferredToMetricEval),
-        ResolvedSet::TopN { .. } => Err(Error::TopNDeferredToMetricEval),
+        ResolvedSet::Filter { set, pred } => {
+            let sources = evaluate(set, cube)?;
+            let mut out = Vec::with_capacity(sources.len());
+            for tuple in sources {
+                if predicate_holds(pred, &tuple, cube)? {
+                    out.push(tuple);
+                }
+            }
+            Ok(out)
+        }
+
+        ResolvedSet::TopN { set, n, by } => {
+            let sources = evaluate(set, cube)?;
+            // Score each candidate; `Missing` / `Error` score -∞ so they
+            // sink to the bottom deterministically. Carry the source index
+            // alongside the score so a stable sort breaks ties by pre-order
+            // position.
+            let mut scored: Vec<(usize, f64, ResolvedTuple<'s>)> =
+                Vec::with_capacity(sources.len());
+            for (idx, tuple) in sources.into_iter().enumerate() {
+                let score = score_by_metric(by, &tuple, cube)?;
+                scored.push((idx, score, tuple));
+            }
+            scored.sort_by(|a, b| {
+                // Desc by score, then asc by original index for ties.
+                b.1.partial_cmp(&a.1)
+                    .unwrap_or(std::cmp::Ordering::Equal)
+                    .then_with(|| a.0.cmp(&b.0))
+            });
+            let take = n.get().min(scored.len());
+            Ok(scored
+                .into_iter()
+                .take(take)
+                .map(|(_, _, tuple)| tuple)
+                .collect())
+        }
     }
+}
+
+// ── Filter predicate evaluation ───────────────────────────────────────────
+
+/// Check whether `tuple` satisfies `pred` against the cube.
+///
+/// - `Eq` / `Gt` / `Lt` evaluate the predicate's metric at the tuple. A
+///   `Cell::Valid` whose value satisfies the comparison passes; every
+///   other cell state (`Missing`, `Error`) is conservatively false.
+/// - `In` / `NotIn` compare the tuple's member on the named dim against
+///   the path prefix. A tuple missing that dim is conservatively false for
+///   `In` and true for `NotIn`.
+fn predicate_holds(
+    pred: &ResolvedPredicate<'_>,
+    tuple: &ResolvedTuple<'_>,
+    cube: &InMemoryCube,
+) -> Result<bool, Error> {
+    match pred {
+        ResolvedPredicate::Eq { metric, value } => {
+            Ok(cell_passes(evaluate_metric_at(metric, tuple, cube)?, |v| {
+                v == *value
+            }))
+        }
+        ResolvedPredicate::Gt { metric, value } => {
+            Ok(cell_passes(evaluate_metric_at(metric, tuple, cube)?, |v| {
+                v > *value
+            }))
+        }
+        ResolvedPredicate::Lt { metric, value } => {
+            Ok(cell_passes(evaluate_metric_at(metric, tuple, cube)?, |v| {
+                v < *value
+            }))
+        }
+        ResolvedPredicate::In { dim, path_prefix } => Ok(path_prefix_matches(
+            tuple,
+            &dim.dim.name,
+            path_prefix
+                .segments()
+                .cloned()
+                .collect::<Vec<Name>>()
+                .as_slice(),
+        )),
+        ResolvedPredicate::NotIn { dim, path_prefix } => Ok(!path_prefix_matches(
+            tuple,
+            &dim.dim.name,
+            path_prefix
+                .segments()
+                .cloned()
+                .collect::<Vec<Name>>()
+                .as_slice(),
+        )),
+    }
+}
+
+/// Whether a scored cell passes a numeric comparison. `Missing` / `Error`
+/// are treated as false.
+fn cell_passes<F: Fn(f64) -> bool>(cell: Cell, cmp: F) -> bool {
+    match cell {
+        Cell::Valid { value, .. } => cmp(value),
+        _ => false,
+    }
+}
+
+/// Evaluate a metric handle at a tuple. Measures go straight through
+/// `evaluate_measure`; metrics thread through the full `evaluate_expr`
+/// machinery so dependent metrics (e.g., `ADR = Revenue / Nights`) work
+/// uniformly.
+fn evaluate_metric_at(
+    handle: &MetricHandle<'_>,
+    tuple: &ResolvedTuple<'_>,
+    cube: &InMemoryCube,
+) -> Result<Cell, Error> {
+    let name = match handle {
+        MetricHandle::Measure(m) => &m.name,
+        MetricHandle::Metric(m) => &m.name,
+    };
+    evaluate_expr(
+        &tatami::schema::metric::Expr::Ref { name: name.clone() },
+        tuple,
+        cube,
+    )
+}
+
+/// Extract a comparable score from a metric handle at a tuple. Used by
+/// `TopN`. `Missing` / `Error` score [`f64::NEG_INFINITY`] — a
+/// deterministic "lowest rank" choice for v0.1.
+fn score_by_metric(
+    handle: &MetricHandle<'_>,
+    tuple: &ResolvedTuple<'_>,
+    cube: &InMemoryCube,
+) -> Result<f64, Error> {
+    match evaluate_metric_at(handle, tuple, cube)? {
+        Cell::Valid { value, .. } => Ok(value),
+        _ => Ok(f64::NEG_INFINITY),
+    }
+}
+
+/// Whether the tuple's member on `dim` has a path whose leading segments
+/// match `prefix`. A tuple without that dim returns false.
+fn path_prefix_matches(tuple: &ResolvedTuple<'_>, dim: &Name, prefix: &[Name]) -> bool {
+    let Some(member) = tuple.members.iter().find(|m| m.dim.dim.name == *dim) else {
+        return false;
+    };
+    if prefix.len() > member.path.len() {
+        return false;
+    }
+    member
+        .path
+        .segments()
+        .zip(prefix.iter())
+        .all(|(seg, pre)| seg == pre)
 }
 
 // ── Helpers ────────────────────────────────────────────────────────────────
@@ -369,7 +528,7 @@ mod tests {
             &cube,
             Set::members(n("Geography"), n("Default"), n("Country")),
         );
-        let ts = evaluate(&set, cube.catalogue()).expect("eval ok");
+        let ts = evaluate(&set, &cube).expect("eval ok");
         let paths = single_paths(&ts);
         // Pre-order DFS, BTreeMap children: APAC→JP, EMEA→FR, EMEA→UK.
         assert_eq!(
@@ -394,7 +553,7 @@ mod tests {
                 mr("Geography", "Default", vec!["EMEA", "FR"]),
             ),
         );
-        let ts = evaluate(&set, cube.catalogue()).expect("eval ok");
+        let ts = evaluate(&set, &cube).expect("eval ok");
         // JP, FR — but catalogue order at Country level is [APAC/JP,
         // EMEA/FR, EMEA/UK], so the range covers [APAC/JP, EMEA/FR].
         let paths = single_paths(&ts);
@@ -433,7 +592,7 @@ mod tests {
         let cube = InMemoryCube::new(df, schema).expect("cube");
 
         let set = resolve_set(&cube, Set::named(n("AllRegions")));
-        let ts = evaluate(&set, cube.catalogue()).expect("eval ok");
+        let ts = evaluate(&set, &cube).expect("eval ok");
         let paths = single_paths(&ts);
         assert_eq!(
             paths,
@@ -454,7 +613,7 @@ mod tests {
             ])
             .expect("non-empty"),
         );
-        let ts = evaluate(&set, cube.catalogue()).expect("eval ok");
+        let ts = evaluate(&set, &cube).expect("eval ok");
         let paths = single_paths(&ts);
         assert_eq!(
             paths,
@@ -472,7 +631,7 @@ mod tests {
         let parents =
             Set::explicit(vec![mr("Geography", "Default", vec!["EMEA"])]).expect("non-empty");
         let set = resolve_set(&cube, parents.children());
-        let ts = evaluate(&set, cube.catalogue()).expect("eval ok");
+        let ts = evaluate(&set, &cube).expect("eval ok");
         let paths = single_paths(&ts);
         assert_eq!(
             paths,
@@ -491,7 +650,7 @@ mod tests {
             &cube,
             Set::members(n("Geography"), n("Default"), n("Region")).descendants_to(n("Country")),
         );
-        let ts = evaluate(&set, cube.catalogue()).expect("eval ok");
+        let ts = evaluate(&set, &cube).expect("eval ok");
         let paths = single_paths(&ts);
         // APAC/JP (below APAC), EMEA/FR, EMEA/UK (below EMEA).
         assert_eq!(
@@ -510,7 +669,7 @@ mod tests {
         let left = Set::members(n("Geography"), n("Default"), n("Region"));
         let right = Set::members(n("Segment"), n("Default"), n("Tier"));
         let set = resolve_set(&cube, left.cross(right));
-        let ts = evaluate(&set, cube.catalogue()).expect("eval ok");
+        let ts = evaluate(&set, &cube).expect("eval ok");
         // 2 regions × 2 tiers = 4 tuples; each tuple has 2 members,
         // ordered (region, tier).
         assert_eq!(ts.len(), 4);
@@ -549,7 +708,7 @@ mod tests {
         ])
         .expect("non-empty");
         let set = resolve_set(&cube, left.union(right));
-        let ts = evaluate(&set, cube.catalogue()).expect("eval ok");
+        let ts = evaluate(&set, &cube).expect("eval ok");
         let paths = single_paths(&ts);
         assert_eq!(
             paths,
@@ -606,12 +765,8 @@ mod tests {
         let b =
             Set::explicit(vec![mr("Geography", "Default", vec!["EMEA", "FR"])]).expect("non-empty");
 
-        let ab = evaluate(
-            &resolve_set(&cube, a.clone().union(b.clone())),
-            cube.catalogue(),
-        )
-        .expect("eval");
-        let ba = evaluate(&resolve_set(&cube, b.union(a)), cube.catalogue()).expect("eval");
+        let ab = evaluate(&resolve_set(&cube, a.clone().union(b.clone())), &cube).expect("eval");
+        let ba = evaluate(&resolve_set(&cube, b.union(a)), &cube).expect("eval");
 
         assert_eq!(signatures(&ab), signatures(&ba));
         let _ = as_set; // silence unused warning for the surrogate helper
@@ -623,9 +778,8 @@ mod tests {
         let cube = fixture_cube();
         let a = Set::members(n("Geography"), n("Default"), n("Region"));
 
-        let a_ts = evaluate(&resolve_set(&cube, a.clone()), cube.catalogue()).expect("eval a");
-        let aa_ts =
-            evaluate(&resolve_set(&cube, a.clone().union(a)), cube.catalogue()).expect("eval aa");
+        let a_ts = evaluate(&resolve_set(&cube, a.clone()), &cube).expect("eval a");
+        let aa_ts = evaluate(&resolve_set(&cube, a.clone().union(a)), &cube).expect("eval aa");
 
         assert_eq!(signatures(&a_ts), signatures(&aa_ts));
     }
@@ -637,12 +791,8 @@ mod tests {
         let a = Set::members(n("Geography"), n("Default"), n("Region"));
         let b = Set::members(n("Segment"), n("Default"), n("Tier"));
 
-        let ab = evaluate(
-            &resolve_set(&cube, a.clone().cross(b.clone())),
-            cube.catalogue(),
-        )
-        .expect("eval");
-        let ba = evaluate(&resolve_set(&cube, b.cross(a)), cube.catalogue()).expect("eval");
+        let ab = evaluate(&resolve_set(&cube, a.clone().cross(b.clone())), &cube).expect("eval");
+        let ba = evaluate(&resolve_set(&cube, b.cross(a)), &cube).expect("eval");
 
         // Rearrange each tuple's members to a canonical (by dim name)
         // order, then compare as multisets.
@@ -684,7 +834,7 @@ mod tests {
                 &cube,
                 a.clone().union(b.clone()).descendants_to(n("Country")),
             ),
-            cube.catalogue(),
+            &cube,
         )
         .expect("eval lhs");
         let rhs = evaluate(
@@ -693,38 +843,108 @@ mod tests {
                 a.descendants_to(n("Country"))
                     .union(b.descendants_to(n("Country"))),
             ),
-            cube.catalogue(),
+            &cube,
         )
         .expect("eval rhs");
 
         assert_eq!(signatures(&lhs), signatures(&rhs));
     }
 
-    // ── Deferred-variant stubs ─────────────────────────────────────────
+    // ── Filter + TopN (Phase 5g) ───────────────────────────────────────
 
     #[test]
-    fn evaluate_filter_returns_deferred_error() {
+    fn filter_keeps_tuples_matching_predicate_gt() {
+        // EMEA has amount 1 + 2 = 3; APAC has 3. Gt(2) keeps both EMEA and
+        // APAC (each is above 2 as a region-level sum); Gt(10) keeps none.
         let cube = fixture_cube();
-        let set = resolve_set(
+        let base = Set::members(n("Geography"), n("Default"), n("Region"));
+        let kept = resolve_set(
             &cube,
-            Set::members(n("Geography"), n("Default"), n("Region")).filter(Predicate::Gt {
+            base.clone().filter(Predicate::Gt {
                 metric: n("amount"),
-                value: 0.0,
+                value: 2.5,
             }),
         );
-        let err = evaluate(&set, cube.catalogue()).expect_err("filter deferred");
-        assert!(matches!(err, Error::FilterDeferredToMetricEval));
+        let dropped = resolve_set(
+            &cube,
+            base.filter(Predicate::Gt {
+                metric: n("amount"),
+                value: 10.0,
+            }),
+        );
+        let kept_ts = evaluate(&kept, &cube).expect("eval kept");
+        let dropped_ts = evaluate(&dropped, &cube).expect("eval dropped");
+
+        // EMEA = 3.0, APAC = 3.0 — both survive Gt(2.5).
+        assert_eq!(kept_ts.len(), 2, "both regions exceed 2.5");
+        assert!(
+            dropped_ts.is_empty(),
+            "no regions exceed 10.0, got {dropped_ts:?}"
+        );
     }
 
     #[test]
-    fn evaluate_topn_returns_deferred_error() {
+    fn topn_returns_n_highest_scored_tuples() {
+        // Country-level amounts: APAC/JP = 3, EMEA/FR = 2, EMEA/UK = 1.
+        // Top(2 by amount) keeps JP (3) and FR (2) in descending-score order.
         let cube = fixture_cube();
         let set = resolve_set(
             &cube,
-            Set::members(n("Geography"), n("Default"), n("Region"))
+            Set::members(n("Geography"), n("Default"), n("Country"))
                 .top(NonZeroUsize::new(2).expect("nonzero"), n("amount")),
         );
-        let err = evaluate(&set, cube.catalogue()).expect_err("topn deferred");
-        assert!(matches!(err, Error::TopNDeferredToMetricEval));
+        let ts = evaluate(&set, &cube).expect("eval ok");
+        assert_eq!(ts.len(), 2, "n=2 → two tuples");
+        let leaves: Vec<String> = ts
+            .iter()
+            .map(|t| {
+                t.members[0]
+                    .path
+                    .segments()
+                    .last()
+                    .expect("non-empty path")
+                    .as_str()
+                    .to_owned()
+            })
+            .collect();
+        assert_eq!(leaves, vec!["JP".to_owned(), "FR".to_owned()]);
+    }
+
+    #[test]
+    fn topn_with_ties_is_deterministic() {
+        // Build a schema where every region-level amount ties at the same
+        // value. With identical scores, Top(2) must pick the two
+        // lowest-indexed tuples in pre-order (APAC then EMEA).
+        let df = df! {
+            "region"  => ["EMEA", "EMEA", "APAC", "APAC"],
+            "country" => ["UK",   "FR",   "JP",   "SG"],
+            "tier"    => ["Business", "Leisure", "Business", "Leisure"],
+            "amount"  => [5.0_f64, 5.0, 5.0, 5.0],
+        }
+        .expect("frame valid");
+        let cube = InMemoryCube::new(df, fixture_schema()).expect("cube");
+        // Country level — four tuples, each summing to 5.0 for its single
+        // row. Top(2) with all-ties keeps the first two in pre-order.
+        let set = resolve_set(
+            &cube,
+            Set::members(n("Geography"), n("Default"), n("Country"))
+                .top(NonZeroUsize::new(2).expect("nonzero"), n("amount")),
+        );
+        let ts = evaluate(&set, &cube).expect("eval ok");
+        assert_eq!(ts.len(), 2);
+        let leaves: Vec<String> = ts
+            .iter()
+            .map(|t| {
+                t.members[0]
+                    .path
+                    .segments()
+                    .last()
+                    .expect("non-empty path")
+                    .as_str()
+                    .to_owned()
+            })
+            .collect();
+        // Pre-order at Country level = [APAC/JP, APAC/SG, EMEA/FR, EMEA/UK].
+        assert_eq!(leaves, vec!["JP".to_owned(), "SG".to_owned()]);
     }
 }

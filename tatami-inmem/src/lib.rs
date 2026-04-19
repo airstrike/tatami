@@ -8,9 +8,9 @@
 //! [`InMemoryCube::members`] from it. Phase 5c ([`resolve`]) lifts the
 //! public [`Query`] into a crate-internal `ResolvedQuery` that carries
 //! schema-binding proofs; this is the only place in the pipeline where
-//! `Result` appears for ref-existence failures. [`InMemoryCube::query`]
-//! still short-circuits with [`Error::NotImplemented`] until Phase 5d–g
-//! land.
+//! `Result` appears for ref-existence failures. Phase 5g wires the full
+//! set / metric / assembly pipeline into [`InMemoryCube::query`], making
+//! the cube end-to-end functional.
 
 mod catalogue;
 mod eval;
@@ -28,9 +28,9 @@ use crate::catalogue::Catalogue;
 /// Construct via [`InMemoryCube::new`], which validates that the fact frame's
 /// columns match the schema's measures and dimension levels (Phase 5a of
 /// MAP_PLAN.md §5) and then builds a member catalogue used by
-/// [`InMemoryCube::members`] (Phase 5b). Query evaluation lands in
-/// Phase 5c–g; [`InMemoryCube::query`] still returns
-/// [`Error::NotImplemented`].
+/// [`InMemoryCube::members`] (Phase 5b). [`InMemoryCube::query`] evaluates
+/// resolved queries end-to-end — resolve (5c) → set / metric eval (5d–f)
+/// → assemble results (5g).
 #[derive(Debug)]
 pub struct InMemoryCube {
     pub(crate) schema: Schema,
@@ -101,8 +101,9 @@ impl Cube for InMemoryCube {
         Ok(self.schema.clone())
     }
 
-    async fn query(&self, _q: &Query) -> Result<Results, Self::Error> {
-        Err(Error::NotImplemented)
+    async fn query(&self, q: &Query) -> Result<Results, Self::Error> {
+        let resolved = resolve::resolve(q, &self.schema, &self.catalogue)?;
+        eval::query::evaluate(&resolved, self)
     }
 
     async fn members(
@@ -120,10 +121,6 @@ impl Cube for InMemoryCube {
 #[derive(Debug, thiserror::Error)]
 #[non_exhaustive]
 pub enum Error {
-    /// Evaluation not yet implemented (Phase 5 sub-steps 5c–g light this up).
-    #[error("tatami-inmem: evaluation not yet implemented (Phase 5 of MAP_PLAN.md)")]
-    NotImplemented,
-
     /// A measure's column is missing from the fact frame.
     #[error("measure {measure} references column {column} which is not in the fact frame")]
     MissingMeasureColumn {
@@ -377,32 +374,7 @@ pub enum Error {
         reason: &'static str,
     },
 
-    // ── Phase 5d: set evaluation (deferred variants) ───────────────────
-    //
-    // `Set::Filter` and `Set::TopN` both require the metric evaluator
-    // (Phase 5f) to materialise their semantics. Phase 5d's set evaluator
-    // surfaces these variants as typed errors rather than panicking or
-    // silently returning empty vectors, so the phase-boundary is explicit.
-    /// `Set::Filter` evaluation needs metric evaluation to be wired up.
-    ///
-    /// Phase 5d returns this variant for every `ResolvedSet::Filter` it
-    /// encounters; Phase 5g replaces the short-circuit with a real
-    /// predicate evaluator once Phase 5f's metric evaluator lands.
-    #[error(
-        "set evaluation: Filter requires metric evaluation — implemented in Phase 5g after 5f metric evaluator lands"
-    )]
-    FilterDeferredToMetricEval,
-
-    /// `Set::TopN` evaluation needs metric evaluation to be wired up.
-    ///
-    /// Phase 5d returns this variant for every `ResolvedSet::TopN` it
-    /// encounters; Phase 5g replaces the short-circuit with a real
-    /// ranking evaluator once Phase 5f's metric evaluator lands.
-    #[error(
-        "set evaluation: TopN requires metric evaluation — implemented in Phase 5g after 5f metric evaluator lands"
-    )]
-    TopNDeferredToMetricEval,
-
+    // ── Phase 5d: set evaluation ───────────────────────────────────────
     /// A set evaluator reached a `ResolvedSet` whose shape it could not
     /// evaluate — for example, a cross-join as the argument of `Children`,
     /// or an `Explicit` set with members spanning multiple dims under

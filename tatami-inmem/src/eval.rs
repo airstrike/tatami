@@ -16,9 +16,10 @@
 //! - [`aggregate`] (Phase 5e) evaluates a single [`Measure`] at a
 //!   [`ResolvedTuple`] context, including the semi-additive rollup rule
 //!   that guards against silent wrong answers (MAP §8 R3).
-//!
-//! Phase 5f (metric tree eval) and 5g (query execution) land as additional
-//! submodules here.
+//! - [`metric`] (Phase 5f) folds a [`tatami::schema::metric::Expr`] tree at
+//!   a tuple context into a single [`tatami::Cell`].
+//! - [`query`] (Phase 5g) orchestrates the pipeline above into typed
+//!   [`tatami::Results`] values, the public output of `Cube::query`.
 //!
 //! [`DataFrame`]: polars_core::prelude::DataFrame
 //! [`Measure`]: tatami::schema::Measure
@@ -26,5 +27,6 @@
 
 pub(crate) mod aggregate;
 pub(crate) mod metric;
+pub(crate) mod query;
 pub(crate) mod set;
 pub(crate) mod tuple;
