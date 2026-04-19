@@ -20,10 +20,14 @@
 //! ### Shape assembly
 //!
 //! 1. Evaluate each axis's [`ResolvedSet`] into a `Vec<ResolvedTuple>`.
-//! 2. For every grid position `(row, column, page, slicer)`, merge the
-//!    tuples (axis dims are disjoint, enforced at resolve time) and
-//!    evaluate every metric via [`crate::eval::metric::evaluate_expr`].
-//! 3. Assemble per the §3.3 table.
+//! 2. For every grid position `(row, column, page, slicer)`, intersect
+//!    the tuples by AUTOEXISTS semantics (MDX): for each dim, prefer
+//!    the deeper-path member; incompatible same-dim members collapse
+//!    the tuple, and that cell becomes `Cell::Missing`. Dims disjoint
+//!    across axes pass through verbatim.
+//! 3. Evaluate every metric at the intersected tuple via
+//!    [`crate::eval::metric::evaluate_expr`].
+//! 4. Assemble per the §3.3 table.
 //!
 //! Multi-metric pivots widen `col_headers` so the grid stays rectangular:
 //! for `m` metrics and `c` column tuples, `col_headers.len() == c * m`,
@@ -43,10 +47,10 @@
 
 use std::cmp::Ordering;
 
-use tatami::query::{MemberRef, Tuple};
+use tatami::query::{MemberRef, Path, Tuple};
 use tatami::schema::metric::Expr;
 use tatami::schema::{Metric, Name};
-use tatami::{Cell, Results, pivot, rollup, scalar, series};
+use tatami::{Cell, Results, missing, pivot, rollup, scalar, series};
 
 use crate::Error;
 use crate::InMemoryCube;
@@ -114,14 +118,19 @@ fn evaluate_series<'s>(
     }
 
     // Assemble per-metric rows. For each metric, walk every row tuple
-    // (merged with the slicer) and evaluate.
+    // (intersected with the slicer) and evaluate. An empty intersection
+    // (slicer pins a dim with a path incompatible with the row) yields
+    // `Cell::Missing` rather than evaluating.
     let mut series_rows: Vec<series::Row> = Vec::with_capacity(resolved.metrics.len());
     for metric_handle in &resolved.metrics {
         let label = metric_name(metric_handle).as_str().to_owned();
         let mut values: Vec<Cell> = Vec::with_capacity(row_tuples.len());
         for row_tuple in &row_tuples {
-            let merged = merge(&resolved.slicer, row_tuple);
-            values.push(evaluate_metric(metric_handle, &merged, cube)?);
+            let cell = match intersect(&resolved.slicer, row_tuple) {
+                Some(merged) => evaluate_metric(metric_handle, &merged, cube)?,
+                None => no_facts_cell(),
+            };
+            values.push(cell);
         }
         series_rows.push(series::Row { label, values });
     }
@@ -221,11 +230,15 @@ fn evaluate_pages<'s>(
     // Widen columns by the page axis: for each page, every column tuple
     // paired with it becomes a top-level column header. Order is
     // page-major to match common UX expectations (one page then the next).
+    // A col × page that AUTOEXISTS-collapses (same dim, incompatible
+    // paths) drops that widened header — build_pivot then never sees it.
     let mut widened: Vec<ResolvedTuple<'s>> =
         Vec::with_capacity(col_tuples.len().saturating_mul(page_tuples.len()));
     for page_tuple in &page_tuples {
         for col_tuple in &col_tuples {
-            widened.push(merge(col_tuple, page_tuple));
+            if let Some(merged) = intersect(col_tuple, page_tuple) {
+                widened.push(merged);
+            }
         }
     }
     build_pivot(resolved, row_tuples, widened, cube)
@@ -241,15 +254,20 @@ fn build_pivot<'s>(
 ) -> Result<Results, Error> {
     let n_metrics = resolved.metrics.len();
 
-    // For every row × column × metric, evaluate one cell.
+    // For every row × column × metric, evaluate one cell. AUTOEXISTS:
+    // if slicer × row collapses, the whole row is Missing; if slicer ×
+    // row × col collapses at the column step, just that cell is Missing.
     let mut cells: Vec<Vec<Cell>> = Vec::with_capacity(row_tuples.len());
     for row_tuple in &row_tuples {
-        let merged_row = merge(&resolved.slicer, row_tuple);
+        let merged_row = intersect(&resolved.slicer, row_tuple);
         let mut row_cells: Vec<Cell> = Vec::with_capacity(col_tuples.len() * n_metrics);
         for col_tuple in &col_tuples {
-            let merged = merge(&merged_row, col_tuple);
+            let merged = merged_row.as_ref().and_then(|mr| intersect(mr, col_tuple));
             for metric_handle in &resolved.metrics {
-                row_cells.push(evaluate_metric(metric_handle, &merged, cube)?);
+                match &merged {
+                    Some(m) => row_cells.push(evaluate_metric(metric_handle, m, cube)?),
+                    None => row_cells.push(no_facts_cell()),
+                }
             }
         }
         cells.push(row_cells);
@@ -311,16 +329,20 @@ fn evaluate_rollup<'s>(
     // explicitly — pinning the slicer × the synthesized root member.
     let root_member = synthesize_root_member(&row_tuples, &root_ref)?;
     let root_tuple = ResolvedTuple::from_members(vec![root_member]);
-    let merged_root = merge(&resolved.slicer, &root_tuple);
-    let root_cell = evaluate_metric(primary, &merged_root, cube)?;
+    let root_cell = match intersect(&resolved.slicer, &root_tuple) {
+        Some(merged) => evaluate_metric(primary, &merged, cube)?,
+        None => no_facts_cell(),
+    };
 
     // Walk each flat tuple, evaluate the primary metric, collect
     // (member_ref, cell) pairs. These are the descendants that slot under
     // the synthesized root.
     let mut descendants: Vec<(MemberRef, Cell)> = Vec::with_capacity(row_tuples.len());
     for row_tuple in &row_tuples {
-        let merged = merge(&resolved.slicer, row_tuple);
-        let cell = evaluate_metric(primary, &merged, cube)?;
+        let cell = match intersect(&resolved.slicer, row_tuple) {
+            Some(merged) => evaluate_metric(primary, &merged, cube)?,
+            None => no_facts_cell(),
+        };
         let first_member = row_tuple
             .members
             .first()
@@ -524,8 +546,8 @@ fn apply_options_pivot(
         // of the metric-widened row.
         let mut indices: Vec<usize> = (0..row_headers.len()).collect();
         indices.sort_by(|&a, &b| {
-            let va = cell_score(cells[a].get(metric_idx).unwrap_or(&missing_cell()));
-            let vb = cell_score(cells[b].get(metric_idx).unwrap_or(&missing_cell()));
+            let va = cell_score(cells[a].get(metric_idx).unwrap_or(&no_facts_cell()));
+            let vb = cell_score(cells[b].get(metric_idx).unwrap_or(&no_facts_cell()));
             let base = va.partial_cmp(&vb).unwrap_or(Ordering::Equal);
             match ob.direction {
                 tatami::query::Direction::Asc => base,
@@ -554,12 +576,6 @@ fn cell_score(cell: &Cell) -> f64 {
     match cell {
         Cell::Valid { value, .. } => *value,
         _ => f64::NEG_INFINITY,
-    }
-}
-
-fn missing_cell() -> Cell {
-    Cell::Missing {
-        reason: tatami::missing::Reason::NoFacts,
     }
 }
 
@@ -613,23 +629,75 @@ fn metric_name<'h, 's>(handle: &'h MetricHandle<'s>) -> &'h Name {
     }
 }
 
-/// Concatenate two tuples' members, overriding `base` members whose dim
-/// appears in `overlay`. Axis dim-disjointness (from resolve) makes this
-/// an honest merge when the caller passes disjoint tuples.
-fn merge<'s>(base: &ResolvedTuple<'s>, overlay: &ResolvedTuple<'s>) -> ResolvedTuple<'s> {
-    let mut members: Vec<ResolvedMember<'s>> = base
-        .members
-        .iter()
-        .filter(|m| {
-            !overlay
-                .members
-                .iter()
-                .any(|o| o.dim.dim.name == m.dim.dim.name)
-        })
-        .cloned()
-        .collect();
-    members.extend(overlay.members.iter().cloned());
-    ResolvedTuple::from_members(members)
+/// Intersect two tuples by AUTOEXISTS (MDX, Microsoft Learn):
+/// for each dim, if both sides carry a member their paths must be
+/// prefix-compatible — one an ancestor of the other in the same
+/// hierarchy — and the deeper (finer-grained) member survives.
+/// Dims unique to one side pass through. Incompatible same-dim
+/// members collapse the whole tuple to `None`, which the caller maps
+/// to [`Cell::Missing`].
+fn intersect<'s>(
+    base: &ResolvedTuple<'s>,
+    overlay: &ResolvedTuple<'s>,
+) -> Option<ResolvedTuple<'s>> {
+    let mut members: Vec<ResolvedMember<'s>> = Vec::with_capacity(base.members.len());
+    for b in &base.members {
+        match overlay
+            .members
+            .iter()
+            .find(|o| o.dim.dim.name == b.dim.dim.name)
+        {
+            None => members.push(b.clone()),
+            Some(o) => members.push(intersect_members(b, o)?),
+        }
+    }
+    for o in &overlay.members {
+        if !base
+            .members
+            .iter()
+            .any(|b| b.dim.dim.name == o.dim.dim.name)
+        {
+            members.push(o.clone());
+        }
+    }
+    Some(ResolvedTuple::from_members(members))
+}
+
+/// Path-prefix intersection of two same-dim members. Equal paths →
+/// either side; one path a prefix of the other → the deeper side.
+/// Otherwise `None`. Members on different hierarchies of the same dim
+/// are also `None` for v0.1 (no attribute-relationship map yet).
+fn intersect_members<'s>(
+    a: &ResolvedMember<'s>,
+    b: &ResolvedMember<'s>,
+) -> Option<ResolvedMember<'s>> {
+    if a.hierarchy.hierarchy.name != b.hierarchy.hierarchy.name {
+        return None;
+    }
+    if path_starts_with(&a.path, &b.path) {
+        Some(a.clone())
+    } else if path_starts_with(&b.path, &a.path) {
+        Some(b.clone())
+    } else {
+        None
+    }
+}
+
+/// Whether `long` begins with every segment of `short`, in order.
+/// `short.len() == long.len()` → equality check (prefix of self).
+fn path_starts_with(long: &Path, short: &Path) -> bool {
+    if short.len() > long.len() {
+        return false;
+    }
+    long.segments().zip(short.segments()).all(|(l, s)| l == s)
+}
+
+/// Shorthand: the `NoFacts` Missing cell used whenever an AUTOEXISTS
+/// intersection collapses, or a metric evaluator runs out of facts.
+fn no_facts_cell() -> Cell {
+    Cell::Missing {
+        reason: missing::Reason::NoFacts,
+    }
 }
 
 /// Project a [`ResolvedTuple`] to a public [`Tuple`] for embedding in
@@ -929,6 +997,142 @@ mod tests {
                 assert_eq!(p.cells()[0].len(), 2);
             }
             other => panic!("expected Pivot, got {other:?}"),
+        }
+    }
+
+    /// AUTOEXISTS (MDX): Region on rows × Country on columns — same
+    /// Geography dim at two levels. Compatible cells (country in region)
+    /// carry the country's value; incompatible cells (country not in
+    /// region) must be `Cell::Missing`, not silently repeat a value.
+    #[test]
+    fn autoexists_same_dim_pivot_returns_missing_for_incompatible_cells() {
+        let cube = fixture_cube();
+        let q = Query {
+            axes: Axes::Pivot {
+                rows: Set::members(n("Geography"), n("Default"), n("Region")),
+                columns: Set::members(n("Geography"), n("Default"), n("Country")),
+            },
+            slicer: Tuple::single(mr("Scenario", "Default", &["Actual"])),
+            metrics: vec![n("amount")],
+            options: tatami::query::Options::default(),
+        };
+        let r = run_query(&cube, q);
+        match r {
+            Results::Pivot(p) => {
+                let rows: Vec<&str> = p
+                    .row_headers()
+                    .iter()
+                    .map(|h| {
+                        h.members()[0]
+                            .path
+                            .segments()
+                            .last()
+                            .expect("non-empty")
+                            .as_str()
+                    })
+                    .collect();
+                let cols: Vec<&str> = p
+                    .col_headers()
+                    .iter()
+                    .map(|h| {
+                        h.members()[0]
+                            .path
+                            .segments()
+                            .last()
+                            .expect("non-empty")
+                            .as_str()
+                    })
+                    .collect();
+
+                let cell_at = |region: &str, country: &str| -> &Cell {
+                    let r = rows.iter().position(|s| *s == region).expect("region row");
+                    let c = cols
+                        .iter()
+                        .position(|s| *s == country)
+                        .expect("country col");
+                    &p.cells()[r][c]
+                };
+
+                // EMEA × UK/FR are compatible; EMEA × JP/SG are not.
+                match cell_at("EMEA", "UK") {
+                    Cell::Valid { value, .. } => assert_eq!(*value, 100.0),
+                    other => panic!("EMEA×UK expected Valid, got {other:?}"),
+                }
+                match cell_at("EMEA", "FR") {
+                    Cell::Valid { value, .. } => assert_eq!(*value, 200.0),
+                    other => panic!("EMEA×FR expected Valid, got {other:?}"),
+                }
+                assert!(
+                    matches!(cell_at("EMEA", "JP"), Cell::Missing { .. }),
+                    "EMEA×JP must be Missing, got {:?}",
+                    cell_at("EMEA", "JP")
+                );
+                assert!(
+                    matches!(cell_at("EMEA", "SG"), Cell::Missing { .. }),
+                    "EMEA×SG must be Missing, got {:?}",
+                    cell_at("EMEA", "SG")
+                );
+
+                // APAC × JP/SG compatible; APAC × UK/FR not.
+                match cell_at("APAC", "JP") {
+                    Cell::Valid { value, .. } => assert_eq!(*value, 300.0),
+                    other => panic!("APAC×JP expected Valid, got {other:?}"),
+                }
+                match cell_at("APAC", "SG") {
+                    Cell::Valid { value, .. } => assert_eq!(*value, 400.0),
+                    other => panic!("APAC×SG expected Valid, got {other:?}"),
+                }
+                assert!(matches!(cell_at("APAC", "UK"), Cell::Missing { .. }));
+                assert!(matches!(cell_at("APAC", "FR"), Cell::Missing { .. }));
+            }
+            other => panic!("expected Pivot, got {other:?}"),
+        }
+    }
+
+    /// Slicer pins a region; rows list countries. Countries under the
+    /// pinned region survive (deeper path wins the intersection);
+    /// countries under a different region collapse to `Cell::Missing`.
+    #[test]
+    fn autoexists_slicer_and_axis_same_dim_narrow_to_compatible_rows() {
+        let cube = fixture_cube();
+        let q = Query {
+            axes: Axes::Series {
+                rows: Set::members(n("Geography"), n("Default"), n("Country")),
+            },
+            slicer: Tuple::of([
+                mr("Scenario", "Default", &["Actual"]),
+                mr("Geography", "Default", &["EMEA"]),
+            ])
+            .expect("disjoint dims"),
+            metrics: vec![n("amount")],
+            options: tatami::query::Options::default(),
+        };
+        let r = run_query(&cube, q);
+        match r {
+            Results::Series(s) => {
+                let leaves: Vec<&str> = s
+                    .x()
+                    .iter()
+                    .map(|m| m.path.segments().last().expect("non-empty").as_str())
+                    .collect();
+                assert_eq!(leaves, vec!["JP", "SG", "FR", "UK"], "catalogue order");
+                let values = &s.rows()[0].values;
+                let by = |leaf: &str| -> &Cell {
+                    let idx = leaves.iter().position(|s| *s == leaf).expect("leaf");
+                    &values[idx]
+                };
+                match by("UK") {
+                    Cell::Valid { value, .. } => assert_eq!(*value, 100.0),
+                    other => panic!("UK expected Valid, got {other:?}"),
+                }
+                match by("FR") {
+                    Cell::Valid { value, .. } => assert_eq!(*value, 200.0),
+                    other => panic!("FR expected Valid, got {other:?}"),
+                }
+                assert!(matches!(by("JP"), Cell::Missing { .. }));
+                assert!(matches!(by("SG"), Cell::Missing { .. }));
+            }
+            other => panic!("expected Series, got {other:?}"),
         }
     }
 
