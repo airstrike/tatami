@@ -77,8 +77,6 @@ pub(crate) fn evaluate<'s>(
     }
 }
 
-// ── Scalar ────────────────────────────────────────────────────────────────
-
 /// `Axes::Scalar` — no axes. One cell per metric, evaluated at the slicer
 /// tuple alone.
 fn evaluate_scalar<'s>(
@@ -89,8 +87,6 @@ fn evaluate_scalar<'s>(
     let tuple = tuple_of(&resolved.slicer);
     Ok(Results::Scalar(scalar::Result::new(tuple, values)))
 }
-
-// ── Series ────────────────────────────────────────────────────────────────
 
 /// `Axes::Series { rows }` — rows × metrics, with the row tuples' members
 /// as the shared x-axis. One [`series::Row`] per metric.
@@ -135,8 +131,6 @@ fn evaluate_series<'s>(
 
     Ok(Results::Series(series::Result::new(x, series_rows)))
 }
-
-// ── Pivot / Rollup ────────────────────────────────────────────────────────
 
 /// `Axes::Pivot { rows, columns }` — rows × columns grid, one cell per
 /// metric per (row, column). If `rows` is structurally a `Descendants`
@@ -437,8 +431,6 @@ fn insert_by_path(root: &mut rollup::Tree, root_depth: usize, mref: &MemberRef, 
     cursor.value = cell;
 }
 
-// ── Option application ───────────────────────────────────────────────────
-
 /// Apply `options.non_empty`, `options.order`, `options.limit` to a series.
 /// Non-empty drops rows where every metric's value is `Missing`; order
 /// sorts x by the first OrderBy's metric's values; limit truncates x.
@@ -584,8 +576,6 @@ fn permute<T: Clone>(v: Vec<T>, indices: &[usize]) -> Vec<T> {
     indices.iter().map(|&i| v[i].clone()).collect()
 }
 
-// ── Small helpers ────────────────────────────────────────────────────────
-
 /// Evaluate every metric at a single tuple — the per-cell engine for the
 /// `Scalar` variant and the inner loops of `Series` / `Pivot`.
 fn metrics_at<'s>(
@@ -660,8 +650,6 @@ fn member_ref_of(member: &ResolvedMember<'_>) -> MemberRef {
     )
 }
 
-// ── Tests ────────────────────────────────────────────────────────────────
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -684,8 +672,6 @@ mod tests {
         let names: Vec<Name> = segs.iter().copied().map(n).collect();
         MRef::new(n(dim), n(hier), Path::parse(names).expect("non-empty"))
     }
-
-    // ── Fixtures ────────────────────────────────────────────────────────
 
     /// Two-hierarchy cube: Geography (Region → Country) + Scenario + amount.
     fn fixture_cube() -> InMemoryCube {
@@ -723,8 +709,6 @@ mod tests {
             .expect("runtime");
         rt.block_on(cube.query(&q)).expect("query ok")
     }
-
-    // ── 5g core: one test per `Axes` shape ──────────────────────────────
 
     #[test]
     fn scalar_query_returns_scalar_result_with_one_cell_per_metric() {
@@ -1066,8 +1050,6 @@ mod tests {
             other => panic!("expected Series, got {other:?}"),
         }
     }
-
-    // ── Hewton acceptance ──────────────────────────────────────────────
 
     /// Minimal hewton-shaped schema and one fact row, so end-to-end
     /// `Cube::query(Scalar)` against a Revenue metric (= `Expr::Ref` to

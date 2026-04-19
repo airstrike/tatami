@@ -45,8 +45,6 @@ use tatami::schema::{
 use tatami::{Cell, Cube, Query, Results};
 use tatami_inmem::InMemoryCube;
 
-// ── Fixture ──────────────────────────────────────────────────────────────
-
 mod fixture {
     use super::*;
 
@@ -195,8 +193,6 @@ mod fixture {
     ];
 }
 
-// ── Axis-driver helpers ──────────────────────────────────────────────────
-
 /// Drive a set through [`Axes::Series`] and return the x-axis members as a
 /// `HashSet<MemberRef>`. Suitable for single-dim set laws (S1–S3, S6, S8,
 /// S9, S10). CrossJoin-related laws use [`evaluate_pivot_rows`] instead.
@@ -287,8 +283,6 @@ fn futures_block_on<F: std::future::Future>(fut: F) -> F::Output {
         .block_on(fut)
 }
 
-// ── Strategies ───────────────────────────────────────────────────────────
-
 /// Pick a 1–4-element subset of [`fixture::COUNTRY_PATHS`] and return it
 /// as an `Explicit` Geography/Country set. Each member is a fully-qualified
 /// two-segment path `[region, country]` — the Country-level leaf.
@@ -346,8 +340,6 @@ fn geo_path_predicate() -> impl Strategy<Value = Predicate> {
         path_prefix: Path::of(fixture::n(region)),
     })
 }
-
-// ── Set laws ─────────────────────────────────────────────────────────────
 
 proptest! {
     #![proptest_config(ProptestConfig::with_cases(64))]
@@ -504,8 +496,6 @@ proptest! {
         prop_assert_eq!(lhs, rhs);
     }
 }
-
-// ── Metric laws ──────────────────────────────────────────────────────────
 
 proptest! {
     #![proptest_config(ProptestConfig::with_cases(64))]
@@ -743,8 +733,6 @@ proptest! {
         prop_assert!(matches!(summed, Cell::Missing { .. }), "got {summed:?}");
     }
 }
-
-// ── Helpers for set-law strategies ───────────────────────────────────────
 
 /// 1..=3 regions as an `Explicit` Geography/Region set. Two regions in
 /// the fixture (North, South); at least one must be selected.

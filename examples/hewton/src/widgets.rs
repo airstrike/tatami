@@ -44,7 +44,7 @@ pub fn result_panel(state: &QueryState) -> Element<'_, Message> {
         .padding(Padding::from(16))
         .width(Length::Fill)
         .height(Length::Fill)
-        .style(theme::card)
+        .style(theme::container::card)
         .into()
 }
 
@@ -181,8 +181,6 @@ fn render_rollup(tree: &rollup::Tree, depth: u16) -> Element<'_, Message> {
         .spacing(2)
         .into()
 }
-
-// ── Cell formatting ────────────────────────────────────────────────────────
 
 fn render_cell_line(cell: &Cell) -> Element<'_, Message> {
     text(format_cell(cell)).into()

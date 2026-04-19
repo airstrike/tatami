@@ -25,7 +25,7 @@ use std::num::NonZeroUsize;
 use std::sync::Arc;
 
 use iced::widget::{Column, button, center, column, pick_list, row, scrollable, text, text_input};
-use iced::{Alignment, Element, Font, Length, Task, Theme, font};
+use iced::{Alignment, Element, Font, Length, Task, Theme};
 
 use polars_core::prelude::DataFrame;
 use tatami::query::{self, MemberRef, Predicate, Set, Tuple};
@@ -39,33 +39,20 @@ mod schema;
 mod theme;
 mod widgets;
 
-use theme::{
+use theme::constants::{
     CONTROL_HEIGHT, HEADING_SIZE, ICON_BUTTON_PADDING, ICON_SIZE, PICKER_PADDING, PICKER_SIZE,
     TEXT_SIZE,
-};
-
-/// Primary UI typeface — Inter. Loaded from Google Fonts at startup via
-/// `fount`; until the network call resolves, iced falls back to its
-/// platform default sans-serif.
-pub const INTER: Font = Font {
-    family: font::Family::Name("Inter"),
-    weight: font::Weight::Normal,
-    stretch: font::Stretch::Normal,
-    style: font::Style::Normal,
-    optical_size: font::OpticalSize::None,
 };
 
 fn main() -> iced::Result {
     iced::application(App::new, App::update, App::view)
         .theme(Theme::Oxocarbon)
-        .default_font(INTER)
+        .default_font(Font::new("Inter"))
         .font(icon::FONT)
         .window_size((1200.0, 800.0))
         .title("Hewton — tatami v0.1 worked example")
         .run()
 }
-
-// ── Model ──────────────────────────────────────────────────────────────────
 
 /// Application state. The cube and its [`Schema`] arrive asynchronously
 /// once `assets/hewton.csv` parses; all picker options are indices into
@@ -236,8 +223,6 @@ enum QueryState {
     Err(String),
 }
 
-// ── Messages ───────────────────────────────────────────────────────────────
-
 #[derive(Debug, Clone)]
 enum Message {
     /// `assets/hewton.csv` parsed — cube can now be constructed.
@@ -371,8 +356,6 @@ impl fmt::Display for SlicerChoice {
         f.write_str(&self.label)
     }
 }
-
-// ── new / update / view ────────────────────────────────────────────────────
 
 impl App {
     fn new() -> (Self, Task<Message>) {
@@ -756,8 +739,6 @@ impl App {
     }
 }
 
-// ── Sidebar pickers ────────────────────────────────────────────────────────
-
 /// Build the left-hand sidebar of pickers. Every option is derived from
 /// the introspected [`Schema`] — there are no string literals referring to
 /// specific dims, levels, or metrics in this function.
@@ -846,22 +827,20 @@ fn sidebar<'a>(
     .into()
 }
 
-// ── Styling helpers ────────────────────────────────────────────────────────
-
 /// Section heading — small-caps, muted, one notch above body size. Used
 /// at the top of every sidebar section to separate pickers visually
 /// without adding chrome.
 fn heading<'a, M: 'a>(label: &str) -> Element<'a, M> {
     text(label.to_uppercase())
         .size(HEADING_SIZE)
-        .style(theme::muted)
+        .style(theme::text::muted)
         .into()
 }
 
 /// Muted hint — the low-contrast one-liner that explains why a section
 /// is inert (filter off, no rows axis, slicer empty).
 fn hint<'a, M: 'a>(label: &'a str) -> Element<'a, M> {
-    text(label).size(TEXT_SIZE).style(theme::muted).into()
+    text(label).size(TEXT_SIZE).style(theme::text::muted).into()
 }
 
 /// Inline label — fixed-width muted text, meant to sit to the left of a
@@ -871,7 +850,7 @@ const INLINE_LABEL_WIDTH: f32 = 64.0;
 fn inline_label<'a, M: 'a>(label: impl Into<String>) -> Element<'a, M> {
     text(label.into())
         .size(TEXT_SIZE)
-        .style(theme::muted)
+        .style(theme::text::muted)
         .width(Length::Fixed(INLINE_LABEL_WIDTH))
         .into()
 }
@@ -1228,8 +1207,6 @@ fn current_dim_choice(options: &[DimChoice], pick: &AxisPick) -> Option<DimChoic
     }
 }
 
-// ── Picker → state transitions ─────────────────────────────────────────────
-
 /// Translate a dim-picker message into an [`AxisPick`]. When the user
 /// picks a dim, we seed the axis to that dim's first hierarchy / first
 /// level so the query is immediately runnable without a second click.
@@ -1266,8 +1243,6 @@ fn level_for(current: &AxisPick, choice: Option<LevelChoice>) -> AxisPick {
         (AxisPick::None, _) => AxisPick::None,
     }
 }
-
-// ── Query assembly ─────────────────────────────────────────────────────────
 
 /// Infer an [`Axes`] shape from the two axis picks:
 ///
@@ -1440,8 +1415,6 @@ fn load_slicer_options(cube: Option<&Arc<InMemoryCube>>, schema: &Schema) -> Vec
     }
     tasks
 }
-
-// ── Font loading ───────────────────────────────────────────────────────────
 
 /// Fetch a Google Fonts family via `fount`, then register every variant's
 /// bytes with iced. Folds every outcome into a single `FontLoaded` Message

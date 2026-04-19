@@ -176,8 +176,6 @@ impl Catalogue {
     }
 }
 
-// ── Construction ───────────────────────────────────────────────────────────
-
 /// Walk every row of `df` and insert the corresponding path into a fresh
 /// tree for the given `levels` (in order, root-to-leaf).
 fn build_tree(
@@ -261,8 +259,6 @@ enum CellValue {
     Null,
     Text(String),
 }
-
-// ── Navigation helpers ─────────────────────────────────────────────────────
 
 /// Descend `root` along `segments`, returning the reached node or `None` if
 /// any segment is missing.

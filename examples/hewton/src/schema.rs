@@ -29,8 +29,6 @@ pub fn hewton_schema() -> Result<Schema, schema::Error> {
         .build()
 }
 
-// ── Dimensions ─────────────────────────────────────────────────────────────
-
 fn geography() -> Dimension {
     Dimension::regular(n("Geography")).hierarchy(
         Hierarchy::new(n("Default"))
@@ -70,8 +68,6 @@ fn scenario() -> Dimension {
         .hierarchy(Hierarchy::new(n("Default")).level(Level::new(n("Scenario"), n("scenario"))))
 }
 
-// ── Measures ───────────────────────────────────────────────────────────────
-
 fn amount() -> Measure {
     Measure::new(n("amount"), Aggregation::sum()).with_unit(Unit::parse("USD").expect("usd"))
 }
@@ -83,8 +79,6 @@ fn room_nights_sold() -> Measure {
 fn rooms_available() -> Measure {
     Measure::new(n("rooms_available"), Aggregation::sum())
 }
-
-// ── Metrics ────────────────────────────────────────────────────────────────
 
 fn revenue() -> Metric {
     Metric::new(n("Revenue"), Expr::Ref { name: n("amount") })
@@ -131,8 +125,6 @@ fn revenue_mom() -> Metric {
     )
     .with_format("0.0%".into())
 }
-
-// ── Local helpers — keep call sites readable ───────────────────────────────
 
 fn ref_(name: &str) -> Expr {
     Expr::Ref { name: n(name) }

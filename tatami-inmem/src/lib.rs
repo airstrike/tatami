@@ -325,7 +325,6 @@ pub enum Error {
     #[error("unsupported member relation: {0:?}")]
     UnsupportedRelation(MemberRelation),
 
-    // ── Phase 5c: resolve (Query → ResolvedQuery) ──────────────────────
     //
     // These variants surface from `crate::resolve::resolve`. Prefixed
     // `Resolve*` so message text reads naturally when bubbled up through
@@ -459,7 +458,6 @@ pub enum Error {
         reason: &'static str,
     },
 
-    // ── Phase 5d: set evaluation ───────────────────────────────────────
     /// A set evaluator reached a `ResolvedSet` whose shape it could not
     /// evaluate — for example, a cross-join as the argument of `Children`,
     /// or an `Explicit` set with members spanning multiple dims under
@@ -483,7 +481,6 @@ pub enum Error {
         to: Path,
     },
 
-    // ── Phase 5e: tuple + aggregate evaluation ─────────────────────────
     //
     // The filter and aggregate primitives in `crate::eval::tuple` and
     // `crate::eval::aggregate` run inside the polars runtime. Errors from
@@ -520,7 +517,6 @@ pub enum Error {
         reason: String,
     },
 
-    // ── Phase 5f: metric expression evaluation ─────────────────────────
     //
     // The metric-tree evaluator (`crate::eval::metric::evaluate_expr`) is
     // mostly total — arithmetic failures and unbound dims surface as
@@ -546,8 +542,6 @@ pub enum Error {
         name: Name,
     },
 }
-
-// ── Validation ─────────────────────────────────────────────────────────────
 
 fn validate(df: &DataFrame, schema: &Schema) -> Result<(), Error> {
     validate_measures(df, &schema.measures)?;
@@ -904,8 +898,6 @@ mod tests {
             Error::MeasureDtypeMismatch { aggregation, .. } if aggregation == "SemiAdditive"
         ));
     }
-
-    // ── Phase 5b: member catalogue + navigation ─────────────────────────
 
     /// Two-level Geography schema: root `Region`, then `Country`.
     /// Reused by several 5b tests that only need a single hierarchy.
@@ -1281,8 +1273,6 @@ mod tests {
             other => panic!("wrong variant: {other:?}"),
         }
     }
-
-    // ── level_members ──────────────────────────────────────────────────
 
     #[test]
     fn level_members_returns_every_top_level_member() {

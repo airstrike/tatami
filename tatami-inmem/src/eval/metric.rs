@@ -88,8 +88,6 @@ fn walk<'s>(
     }
 }
 
-// ── Const / Ref ───────────────────────────────────────────────────────────
-
 fn const_cell(value: f64) -> Cell {
     if value.is_finite() {
         Cell::Valid {
@@ -139,8 +137,6 @@ fn eval_ref<'s>(
     }
     Err(Error::EvalUnresolvedRef { name: name.clone() })
 }
-
-// ── Binary ────────────────────────────────────────────────────────────────
 
 fn eval_binary<'s>(
     op: BinOp,
@@ -229,8 +225,6 @@ fn combine(op: BinOp, l: Cell, r: Cell) -> Cell {
     }
 }
 
-// ── Lag ───────────────────────────────────────────────────────────────────
-
 fn eval_lag<'s>(
     of: &Expr,
     dim: &Name,
@@ -304,8 +298,6 @@ fn sibling_offset(
     let shifted = shifted as usize;
     members.get(shifted).map(|m| m.path.clone())
 }
-
-// ── PeriodsToDate ─────────────────────────────────────────────────────────
 
 fn eval_ptd<'s>(
     of: &Expr,
@@ -440,8 +432,6 @@ fn eval_ptd<'s>(
     })
 }
 
-// ── At ────────────────────────────────────────────────────────────────────
-
 fn eval_at<'s>(
     of: &Expr,
     at: &Tuple,
@@ -533,8 +523,6 @@ fn merge_tuples<'s>(base: &ResolvedTuple<'s>, overlay: &[ResolvedMember<'s>]) ->
     ResolvedTuple::from_members(members)
 }
 
-// ── Tests ─────────────────────────────────────────────────────────────────
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -573,8 +561,6 @@ mod tests {
         rq.slicer
     }
 
-    // ── Fixtures ───────────────────────────────────────────────────────
-
     /// Time (Year → Month) + Scenario fixture, used by Lag / PTD / At tests.
     /// Amount values laid out so monthly subtotals are easy to spot:
     /// Actual 2026-01 → 10, 2026-02 → 20, 2026-03 → 30.
@@ -605,8 +591,6 @@ mod tests {
         .expect("frame");
         InMemoryCube::new(df, schema).expect("cube")
     }
-
-    // ── Primitives ─────────────────────────────────────────────────────
 
     #[test]
     fn const_returns_literal() {
@@ -679,8 +663,6 @@ mod tests {
             }
         }
     }
-
-    // ── Cell propagation (§3.7 M8, M9) ─────────────────────────────────
 
     #[test]
     fn binary_divide_by_zero_yields_error_cell() {
@@ -775,8 +757,6 @@ mod tests {
             );
         }
     }
-
-    // ── Lag (§3.7 M3, M4, M5) ─────────────────────────────────────────
 
     #[test]
     fn lag_one_period_backward_returns_previous_month() {
@@ -898,8 +878,6 @@ mod tests {
         );
     }
 
-    // ── PeriodsToDate (§3.7 M6) ───────────────────────────────────────
-
     #[test]
     fn periods_to_date_sums_months_in_current_year() {
         let cube = time_fixture();
@@ -960,8 +938,6 @@ mod tests {
         );
     }
 
-    // ── At (§3.7 M7) ──────────────────────────────────────────────────
-
     #[test]
     fn at_overrides_tuple_coordinate() {
         let cube = time_fixture();
@@ -1002,8 +978,6 @@ mod tests {
             "expected 3.0 regardless of context, got {cell:?}"
         );
     }
-
-    // ── Metric-to-metric + cycles ─────────────────────────────────────
 
     #[test]
     fn metric_refs_another_metric_end_to_end() {

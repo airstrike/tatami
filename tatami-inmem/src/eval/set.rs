@@ -257,8 +257,6 @@ pub(crate) fn evaluate<'s>(
     }
 }
 
-// ── Filter predicate evaluation ───────────────────────────────────────────
-
 /// Check whether `tuple` satisfies `pred` against the cube.
 ///
 /// - `Eq` / `Gt` / `Lt` evaluate the predicate's metric at the tuple. A
@@ -368,8 +366,6 @@ fn path_prefix_matches(tuple: &ResolvedTuple<'_>, dim: &Name, prefix: &[Name]) -
         .all(|(seg, pre)| seg == pre)
 }
 
-// ── Helpers ────────────────────────────────────────────────────────────────
-
 /// Merge two tuples into one by concatenating their member lists.
 ///
 /// Resolve-time dim-disjointness on `CrossJoin` (§3.6) guarantees no
@@ -419,8 +415,6 @@ fn member_ref(m: &ResolvedMember<'_>) -> tatami::MemberRef {
     )
 }
 
-// ── Tests ──────────────────────────────────────────────────────────────────
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -434,8 +428,6 @@ mod tests {
 
     use crate::InMemoryCube;
     use crate::resolve;
-
-    // ── Fixture ────────────────────────────────────────────────────────
 
     fn n(s: &str) -> Name {
         Name::parse(s).expect("valid name")
@@ -518,8 +510,6 @@ mod tests {
             })
             .collect()
     }
-
-    // ── Happy paths, per variant ───────────────────────────────────────
 
     #[test]
     fn evaluate_members_returns_every_member_at_level() {
@@ -720,8 +710,6 @@ mod tests {
         );
     }
 
-    // ── Law examples (§3.7 S1, S3, S4, S9) ─────────────────────────────
-
     fn as_set(tuples: &[ResolvedTuple<'_>]) -> HashSet<ResolvedTuple<'static>> {
         // Clone into 'static by rebuilding paths — the handles embed the
         // cube's lifetime so we can't easily promote. Instead, compare via
@@ -849,8 +837,6 @@ mod tests {
 
         assert_eq!(signatures(&lhs), signatures(&rhs));
     }
-
-    // ── Filter + TopN (Phase 5g) ───────────────────────────────────────
 
     #[test]
     fn filter_keeps_tuples_matching_predicate_gt() {

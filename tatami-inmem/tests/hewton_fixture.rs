@@ -282,8 +282,6 @@ mod fixture {
     }
 }
 
-// ── 1. Semi-additive end-to-end — the load-bearing test (MAP §8 R3) ──────
-
 #[tokio::test]
 async fn semi_additive_stock_rolls_up_via_last_not_sum_end_to_end() {
     // Three monthly stock snapshots — 100, 120, 80. The naive additive
@@ -337,8 +335,6 @@ async fn semi_additive_stock_pinned_to_month_returns_that_month_value() {
         other => panic!("expected Scalar, got {other:?}"),
     }
 }
-
-// ── 2. The four §3.5 example queries ─────────────────────────────────────
 
 #[tokio::test]
 async fn fy2026_revenue_scalar_returns_expected_total() {
@@ -495,8 +491,6 @@ async fn sales_by_territory_series_returns_rows() {
     }
 }
 
-// ── 3. Metric composition tests ──────────────────────────────────────────
-
 #[tokio::test]
 async fn yoy_revenue_at_fy2026_jan_equals_hand_computed_growth() {
     // FY2025 Jan Revenue Actual = 500_000; FY2026 Jan Revenue Actual =
@@ -614,8 +608,6 @@ async fn variance_equals_actual_minus_plan_at_each_cell() {
     }
 }
 
-// ── 4. Resolve-layer tests — errors surface before eval fires ────────────
-
 #[tokio::test]
 async fn query_with_unknown_metric_ref_fails_at_resolve_not_eval() {
     // Referencing a metric that doesn't exist in the schema must surface
@@ -677,8 +669,6 @@ async fn query_with_lag_over_non_time_dim_fails_at_resolve() {
         "expected ResolveLagDimNotTime, got {err:?}"
     );
 }
-
-// ── 5. Options pass-through ──────────────────────────────────────────────
 
 #[tokio::test]
 async fn order_and_limit_apply_post_evaluation() {

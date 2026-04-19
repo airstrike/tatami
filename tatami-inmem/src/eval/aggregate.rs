@@ -402,8 +402,6 @@ mod tests {
         &cube.schema
     }
 
-    // ── Semi-additive: the load-bearing test, written first (MAP §8 R3) ──
-
     /// Fixture for the semi-additive test: one Time dim (single level
     /// Month) and a `stock` measure declared non-additive over Time with
     /// `SemiAgg::Last`. Three monthly snapshots — 100, 120, 80 — and an
@@ -536,8 +534,6 @@ mod tests {
         }
     }
 
-    // ── Additive aggregations ──────────────────────────────────────────
-
     /// Geography × Time fixture with integer and float measure columns.
     fn amount_fixture() -> (InMemoryCube, DataFrame, Schema, Measure) {
         let amount = Measure::new(n("amount"), Aggregation::sum());
@@ -647,8 +643,6 @@ mod tests {
             other => panic!("distinct_count: {other:?}"),
         }
     }
-
-    // ── Edge cases ─────────────────────────────────────────────────────
 
     #[test]
     fn empty_filtered_frame_returns_missing_no_facts() {

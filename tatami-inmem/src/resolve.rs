@@ -30,8 +30,6 @@ use tatami::{Query, query};
 use crate::Error;
 use crate::catalogue::Catalogue;
 
-// ── Handles ────────────────────────────────────────────────────────────────
-
 /// Zero-cost handle to a [`Dimension`] resolved against a schema.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub(crate) struct DimHandle<'s> {
@@ -68,8 +66,6 @@ pub(crate) enum MetricHandle<'s> {
     /// The name resolved to a derived metric (formula).
     Metric(&'s Metric),
 }
-
-// ── Resolved query tree ────────────────────────────────────────────────────
 
 /// A query that has been bound to a specific schema and member catalogue.
 ///
@@ -419,8 +415,6 @@ fn level_at_depth<'s>(hierarchy: &HierarchyHandle<'s>, depth: usize) -> Option<L
         .map(|level| LevelHandle { level, index })
 }
 
-// ── Entry point ────────────────────────────────────────────────────────────
-
 /// Resolve a public [`Query`] against a schema and member catalogue.
 ///
 /// Walks the query top-down and fails on the first resolution error — a
@@ -467,8 +461,6 @@ pub(crate) fn resolve<'s>(
         options: q.options.clone(),
     })
 }
-
-// ── Internal resolution context ────────────────────────────────────────────
 
 /// Borrowed resolution context. Keeps the schema and catalogue in one
 /// place so helper fns don't need five parameters each.
@@ -541,8 +533,6 @@ fn resolve_metric_ref<'s>(ctx: &Ctx<'s>, name: &Name) -> Result<MetricHandle<'s>
         (None, None) => Err(Error::ResolveUnresolvedRef { name: name.clone() }),
     }
 }
-
-// ── Axes / sets ────────────────────────────────────────────────────────────
 
 fn resolve_axes<'s>(ctx: &Ctx<'s>, axes: &Axes) -> Result<ResolvedAxes<'s>, Error> {
     Ok(match axes {
@@ -767,8 +757,6 @@ fn resolve_set<'s>(
     }
 }
 
-// ── Member refs, tuples, predicates ───────────────────────────────────────
-
 fn resolve_member_ref<'s>(ctx: &Ctx<'s>, m: &MemberRef) -> Result<ResolvedMember<'s>, Error> {
     let dim = ctx.dim(&m.dim)?;
     let hierarchy = ctx.hierarchy(&dim, &m.hierarchy)?;
@@ -840,8 +828,6 @@ fn resolve_predicate<'s>(ctx: &Ctx<'s>, pred: &Predicate) -> Result<ResolvedPred
     }
 }
 
-// ── Metric expression checks ──────────────────────────────────────────────
-
 /// Walk a metric's [`metric::Expr`] tree to enforce the §3.6 invariants that
 /// the schema builder does not check:
 ///
@@ -891,8 +877,6 @@ fn check_expr(ctx: &Ctx<'_>, expr: &metric::Expr) -> Result<(), Error> {
     }
 }
 
-// ── Tests ──────────────────────────────────────────────────────────────────
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -912,8 +896,6 @@ mod tests {
     fn mr(dim: &str, hier: &str, head: &str) -> MemberRef {
         MemberRef::new(n(dim), n(hier), Path::of(n(head)))
     }
-
-    // ── Shared fixtures ────────────────────────────────────────────────
 
     /// Geography (two-level) + Time (Year → Quarter → Month) + amount.
     fn hewton_shaped_schema() -> Schema {
@@ -953,8 +935,6 @@ mod tests {
     fn hewton_cube() -> InMemoryCube {
         InMemoryCube::new(hewton_shaped_frame(), hewton_shaped_schema()).expect("cube")
     }
-
-    // ── Happy path ─────────────────────────────────────────────────────
 
     #[test]
     fn resolves_scalar_query_against_hewton_schema() {
@@ -1031,8 +1011,6 @@ mod tests {
         };
         assert!(matches!(rows, ResolvedSet::Named { .. }));
     }
-
-    // ── Negative paths ─────────────────────────────────────────────────
 
     #[test]
     fn resolve_rejects_unknown_metric_ref() {
@@ -1269,8 +1247,6 @@ mod tests {
         let err = resolve(&q, &cube.schema, cube.catalogue()).expect_err("cycle");
         assert!(matches!(err, Error::ResolveNamedSetCycle { .. }));
     }
-
-    // ── Extra coverage ─────────────────────────────────────────────────
 
     #[test]
     fn resolve_rejects_member_absent_from_catalogue() {
