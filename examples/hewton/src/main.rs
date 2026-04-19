@@ -39,7 +39,10 @@ mod schema;
 mod theme;
 mod widgets;
 
-use theme::{HEADING_SIZE, ICON_BUTTON_PADDING, ICON_SIZE, PICKER_PADDING, PICKER_SIZE, TEXT_SIZE};
+use theme::{
+    CONTROL_HEIGHT, HEADING_SIZE, ICON_BUTTON_PADDING, ICON_SIZE, PICKER_PADDING, PICKER_SIZE,
+    TEXT_SIZE,
+};
 
 /// Primary UI typeface — Inter. Loaded from Google Fonts at startup via
 /// `fount`; until the network call resolves, iced falls back to its
@@ -879,6 +882,7 @@ fn inline_label<'a, M: 'a>(label: impl Into<String>) -> Element<'a, M> {
 fn back_button<'a>() -> Element<'a, Message> {
     button(icon::chevron_left().size(ICON_SIZE))
         .padding(ICON_BUTTON_PADDING)
+        .height(Length::Fixed(CONTROL_HEIGHT))
         .on_press(Message::Back)
         .into()
 }
@@ -907,6 +911,7 @@ fn metric_panel<'a>(
             .width(Length::Fill);
         let remove = button(icon::close().size(ICON_SIZE))
             .padding(ICON_BUTTON_PADDING)
+            .height(Length::Fixed(CONTROL_HEIGHT))
             .on_press(Message::MetricSlotRemoved(slot));
         children.push(
             row![picker, remove]
@@ -919,6 +924,7 @@ fn metric_panel<'a>(
     children.push(
         button(icon::plus().size(ICON_SIZE))
             .padding(ICON_BUTTON_PADDING)
+            .height(Length::Fixed(CONTROL_HEIGHT))
             .on_press(Message::MetricSlotAdded)
             .into(),
     );
@@ -958,6 +964,7 @@ fn top_n_panel<'a>(
     let clear: Element<'_, Message> = if top_n_by.is_some() {
         button(icon::close().size(ICON_SIZE))
             .padding(ICON_BUTTON_PADDING)
+            .height(Length::Fixed(CONTROL_HEIGHT))
             .on_press(Message::TopNByPicked(None))
             .into()
     } else {
@@ -1115,6 +1122,7 @@ fn slicer_picker<'a>(
     let clear: Element<'a, Message> = if slicer.contains_key(&dim_index) {
         button(icon::close().size(ICON_SIZE))
             .padding(ICON_BUTTON_PADDING)
+            .height(Length::Fixed(CONTROL_HEIGHT))
             .on_press(Message::SlicerPicked(dim_index, None))
             .into()
     } else {

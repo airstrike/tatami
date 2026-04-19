@@ -32,6 +32,12 @@ pub const ICON_SIZE: f32 = 14.0;
 /// [`ICON_SIZE`] to land near a 24 px square.
 pub const ICON_BUTTON_PADDING: [u16; 2] = [3, 6];
 
+/// Fixed visual height for every pick_list / text_input / icon button in
+/// the sidebar. Pinning both sides prevents iced's intrinsic-size
+/// computations from drifting the button 1px off the picker and visually
+/// misaligning rows.
+pub const CONTROL_HEIGHT: f32 = 26.0;
+
 // ── Container / text styles ───────────────────────────────────────────────
 
 /// Card container style — background, border, soft drop shadow.
