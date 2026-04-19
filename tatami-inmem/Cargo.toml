@@ -16,3 +16,8 @@ thiserror   = { workspace = true }
 
 [dev-dependencies]
 tokio = { workspace = true }
+# Justified exception to the MAP §9 baseline dep list: property-based
+# testing of the algebra is the one place random input generation earns
+# its keep, per MAP §5 Phase 5i. Dev-only — never linked into the
+# published cube crate.
+proptest = "1"
