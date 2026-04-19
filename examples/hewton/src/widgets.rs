@@ -181,11 +181,12 @@ fn format_cell(cell: &Cell) -> String {
 }
 
 fn format_tuple(t: &Tuple) -> String {
-    // Tuples are small; join members as `Dim=head`. Real dashboards swap in
-    // richer header-cell rendering (leading icon, drill affordance, etc.).
+    // Drop the `Dim=` prefix — the column/row header's position in the
+    // table already tells you which dim it is. Real dashboards swap in
+    // richer header rendering (leading icon, drill affordance, etc.).
     t.members()
         .iter()
-        .map(|m| format!("{}={}", m.dim, m.path))
+        .map(|m| m.path.to_string())
         .collect::<Vec<_>>()
         .join(", ")
 }
