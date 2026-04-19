@@ -27,6 +27,10 @@ const BOLD: Font = Font {
 /// A panel wrapping the current query's outcome — loading, error, or the
 /// rendered `Results`. Schema-blind: the panel content is entirely derived
 /// from the runtime `QueryState`.
+///
+/// The container always fills the available space and scrolls internally so
+/// transient states (`Idle` / `Running` / `Err`) don't collapse the panel
+/// height and jitter the surrounding layout when the result arrives.
 pub fn result_panel(state: &QueryState) -> Element<'_, Message> {
     let body: Element<'_, Message> = match state {
         QueryState::Idle => text("Pick row/column/metric to run a query.").into(),
@@ -35,8 +39,10 @@ pub fn result_panel(state: &QueryState) -> Element<'_, Message> {
         QueryState::Ok(results) => render(results),
     };
 
-    container(body)
+    container(scrollable(body).width(Length::Fill).height(Length::Fill))
         .padding(Padding::from(16))
+        .width(Length::Fill)
+        .height(Length::Fill)
         .style(theme::card)
         .into()
 }

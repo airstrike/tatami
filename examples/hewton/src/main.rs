@@ -531,25 +531,29 @@ impl App {
             return center(text("Loading hewton facts\u{2026}").size(TEXT_SIZE)).into();
         };
 
-        scrollable(
-            row![
-                sidebar(
-                    schema,
-                    &self.rows,
-                    &self.columns,
-                    &self.metrics,
-                    self.top_n_by,
-                    self.filter_kind,
-                    self.filter_by,
-                    &self.filter_value_text,
-                    &self.slicer,
-                    &self.slicer_options,
-                ),
-                widgets::result_panel(&self.result),
-            ]
-            .spacing(16)
-            .padding(16),
-        )
+        // Each half owns its own scroll — the sidebar can scroll when it
+        // overflows vertically without also pushing the result panel up
+        // or down. The result panel fills the remaining space so it
+        // doesn't collapse to the height of a "Running…" label.
+        row![
+            scrollable(sidebar(
+                schema,
+                &self.rows,
+                &self.columns,
+                &self.metrics,
+                self.top_n_by,
+                self.filter_kind,
+                self.filter_by,
+                &self.filter_value_text,
+                &self.slicer,
+                &self.slicer_options,
+            ))
+            .width(Length::Fixed(280.0))
+            .height(Length::Fill),
+            widgets::result_panel(&self.result),
+        ]
+        .spacing(16)
+        .padding(16)
         .into()
     }
 
@@ -715,6 +719,18 @@ fn heading<'a, M: 'a>(label: &str) -> Element<'a, M> {
 /// is inert (filter off, no rows axis, slicer empty).
 fn hint<'a, M: 'a>(label: &'a str) -> Element<'a, M> {
     text(label).size(TEXT_SIZE).style(theme::muted).into()
+}
+
+/// Inline label — fixed-width muted text, meant to sit to the left of a
+/// picker so the label and its control share a single row.
+const INLINE_LABEL_WIDTH: f32 = 64.0;
+
+fn inline_label<'a, M: 'a>(label: impl Into<String>) -> Element<'a, M> {
+    text(label.into())
+        .size(TEXT_SIZE)
+        .style(theme::muted)
+        .width(Length::Fixed(INLINE_LABEL_WIDTH))
+        .into()
 }
 
 /// Build the stacked Metric pickers — one pick_list per slot, a remove
@@ -918,13 +934,13 @@ fn slicer_picker<'a>(
     slicer_options: &HashMap<usize, Vec<MemberRef>>,
 ) -> Element<'a, Message> {
     let label = dim.name.as_str().to_owned();
-    let header: Element<'a, Message> = text(label).size(TEXT_SIZE).style(theme::muted).into();
 
     let Some(members) = slicer_options.get(&dim_index) else {
-        // Cached data not ready yet — render a placeholder instead of the
-        // picker. The `SchemaReady` handler fires one Task per dim, so
-        // this resolves as soon as that future lands.
-        return column![header, hint("(loading\u{2026})")].spacing(2).into();
+        // Cached data not ready yet — inline hint alongside the label.
+        return row![inline_label(label), hint("(loading\u{2026})")]
+            .align_y(Alignment::Center)
+            .spacing(6)
+            .into();
     };
 
     let options: Vec<SlicerChoice> = members
@@ -957,12 +973,10 @@ fn slicer_picker<'a>(
         text("").into()
     };
 
-    column![
-        header,
-        row![picker, clear].spacing(4).align_y(Alignment::Center),
-    ]
-    .spacing(2)
-    .into()
+    row![inline_label(label), picker, clear]
+        .align_y(Alignment::Center)
+        .spacing(4)
+        .into()
 }
 
 /// Set of dim indices currently occupied by an axis pick.
@@ -1037,8 +1051,17 @@ fn axis_picker<'a>(
         AxisPick::None => text("").into(),
     };
 
-    column![heading(label), dim_list, level_element]
-        .spacing(4)
+    // Label + dim picker (+ level picker when a dim is chosen) all on one
+    // row. When no dim is picked, the level slot is simply absent; when
+    // one is, dim and level split the remaining width evenly.
+    let body: Element<'a, Message> = match *pick {
+        AxisPick::Pick { .. } => row![dim_list, level_element].spacing(4).into(),
+        AxisPick::None => dim_list.into(),
+    };
+
+    row![inline_label(label), body]
+        .align_y(Alignment::Center)
+        .spacing(6)
         .into()
 }
 
