@@ -116,6 +116,67 @@ impl InMemoryCube {
     pub(crate) fn resolve<'s>(&'s self, q: &Query) -> Result<resolve::ResolvedQuery<'s>, Error> {
         resolve::resolve(q, &self.schema, &self.catalogue)
     }
+
+    /// Enumerate every member at a named level within a named hierarchy of
+    /// a named dimension.
+    ///
+    /// The [`Cube`] trait's [`Cube::members`] takes an `at: &MemberRef` that
+    /// is structurally non-empty, so it cannot express "every top-level
+    /// member of this hierarchy" without first constructing a full
+    /// [`Query`]. This inherent method closes that gap for composers /
+    /// slicer UIs that want to offer a top-of-hierarchy picker without
+    /// building a set expression just to list members.
+    ///
+    /// Returns:
+    /// - [`Error::ResolveUnknownDimension`] if `dim` doesn't exist.
+    /// - [`Error::ResolveUnknownHierarchy`] if `hierarchy` doesn't exist
+    ///   within `dim`.
+    /// - [`Error::ResolveUnknownLevel`] if `level` doesn't exist within
+    ///   `hierarchy`.
+    ///
+    /// The returned members are in pre-order DFS traversal order (the same
+    /// order the catalogue's iteration uses elsewhere), so output is
+    /// deterministic.
+    pub fn level_members(
+        &self,
+        dim: &Name,
+        hierarchy: &Name,
+        level: &Name,
+    ) -> Result<Vec<MemberRef>, Error> {
+        let dim_def = self
+            .schema
+            .dimensions
+            .iter()
+            .find(|d| d.name == *dim)
+            .ok_or_else(|| Error::ResolveUnknownDimension { dim: dim.clone() })?;
+        let hierarchy_def = dim_def
+            .hierarchies
+            .iter()
+            .find(|h| h.name == *hierarchy)
+            .ok_or_else(|| Error::ResolveUnknownHierarchy {
+                dim: dim.clone(),
+                hierarchy: hierarchy.clone(),
+            })?;
+        let level_index = hierarchy_def
+            .levels
+            .iter()
+            .position(|l| l.name == *level)
+            .ok_or_else(|| Error::ResolveUnknownLevel {
+                dim: dim.clone(),
+                hierarchy: hierarchy.clone(),
+                level: level.clone(),
+            })?;
+        // `members_at` returns `None` only when the `(dim, hierarchy)` pair
+        // isn't catalogued — `new` catalogues every schema hierarchy, so
+        // reaching that branch would mean internal corruption. Surface as
+        // `UnknownHierarchy` defensively rather than panicking.
+        self.catalogue
+            .members_at(dim, hierarchy, level_index)
+            .ok_or_else(|| Error::ResolveUnknownHierarchy {
+                dim: dim.clone(),
+                hierarchy: hierarchy.clone(),
+            })
+    }
 }
 
 impl Cube for InMemoryCube {
@@ -1216,6 +1277,92 @@ mod tests {
                 assert_eq!(dim.as_str(), "Geography");
                 assert_eq!(hierarchy.as_str(), "Default");
                 assert_eq!(path.head().as_str(), "NoSuchRegion");
+            }
+            other => panic!("wrong variant: {other:?}"),
+        }
+    }
+
+    // ── level_members ──────────────────────────────────────────────────
+
+    #[test]
+    fn level_members_returns_every_top_level_member() {
+        let df = df! {
+            "region"  => ["East", "West", "West"],
+            "country" => ["UK", "US", "CA"],
+            "month"   => ["2026-01", "2026-01", "2026-02"],
+            "amount"  => [1.0_f64, 2.0, 3.0],
+        }
+        .expect("frame valid");
+        let cube = InMemoryCube::new(df, small_schema()).expect("construct cube");
+        let members = cube
+            .level_members(&n("Geography"), &n("Default"), &n("Region"))
+            .expect("level members");
+        let tails: Vec<&str> = members.iter().map(|m| m.path.head().as_str()).collect();
+        assert_eq!(tails, vec!["East", "West"]);
+    }
+
+    #[test]
+    fn level_members_returns_deeper_level_members() {
+        let df = df! {
+            "world"   => ["World", "World", "World"],
+            "country" => ["US", "US", "UK"],
+            "city"    => ["NY", "CA", "London"],
+            "amount"  => [1.0_f64, 2.0, 3.0],
+        }
+        .expect("frame valid");
+        let cube = InMemoryCube::new(df, geo3_schema()).expect("construct cube");
+        let members = cube
+            .level_members(&n("Geography"), &n("Default"), &n("Country"))
+            .expect("level members");
+        let heads: Vec<&str> = members
+            .iter()
+            .map(|m| m.path.tail().last().expect("has tail").as_str())
+            .collect();
+        assert_eq!(heads, vec!["UK", "US"]);
+    }
+
+    #[test]
+    fn level_members_rejects_unknown_dim() {
+        let cube = InMemoryCube::new(small_frame(), small_schema()).expect("construct cube");
+        let err = cube
+            .level_members(&n("NoSuchDim"), &n("Default"), &n("Region"))
+            .expect_err("unknown dim");
+        match err {
+            Error::ResolveUnknownDimension { dim } => assert_eq!(dim.as_str(), "NoSuchDim"),
+            other => panic!("wrong variant: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn level_members_rejects_unknown_hierarchy() {
+        let cube = InMemoryCube::new(small_frame(), small_schema()).expect("construct cube");
+        let err = cube
+            .level_members(&n("Geography"), &n("NoSuch"), &n("Region"))
+            .expect_err("unknown hierarchy");
+        match err {
+            Error::ResolveUnknownHierarchy { dim, hierarchy } => {
+                assert_eq!(dim.as_str(), "Geography");
+                assert_eq!(hierarchy.as_str(), "NoSuch");
+            }
+            other => panic!("wrong variant: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn level_members_rejects_unknown_level() {
+        let cube = InMemoryCube::new(small_frame(), small_schema()).expect("construct cube");
+        let err = cube
+            .level_members(&n("Geography"), &n("Default"), &n("NoSuchLevel"))
+            .expect_err("unknown level");
+        match err {
+            Error::ResolveUnknownLevel {
+                dim,
+                hierarchy,
+                level,
+            } => {
+                assert_eq!(dim.as_str(), "Geography");
+                assert_eq!(hierarchy.as_str(), "Default");
+                assert_eq!(level.as_str(), "NoSuchLevel");
             }
             other => panic!("wrong variant: {other:?}"),
         }

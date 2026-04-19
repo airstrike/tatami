@@ -159,9 +159,9 @@ impl Catalogue {
     /// virtual root); `level_index = 1` means their children; and so on.
     ///
     /// Pre-order DFS so ancestors precede descendants — this is the order
-    /// Phase 5d's `Set::Members` evaluation will want. `#[allow(dead_code)]`
-    /// keeps the build warning-free until 5d wires this in.
-    #[allow(dead_code)]
+    /// Phase 5d's `Set::Members` evaluation will want. Also used by
+    /// [`super::InMemoryCube::level_members`] to power composer / slicer
+    /// pickers.
     pub(crate) fn members_at(
         &self,
         dim: &Name,
@@ -338,7 +338,6 @@ fn collect_leaves(
 /// Pre-order DFS collecting every member at exactly `depth` levels below
 /// `node`. `depth == 0` emits each direct child of `node` keyed under its
 /// own name; the caller controls `at` to supply the path prefix.
-#[allow(dead_code)]
 fn collect_at_depth(
     node: &Node,
     dim: &Name,

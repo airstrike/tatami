@@ -19,14 +19,15 @@
 //! indices, which is fired against the cube and rendered via the
 //! generic `widgets::render_*` adapters.
 
+use std::collections::HashMap;
 use std::fmt;
 use std::sync::Arc;
 
-use iced::widget::{center, column, pick_list, row, scrollable, text};
+use iced::widget::{Column, button, center, column, pick_list, row, scrollable, text};
 use iced::{Alignment, Element, Font, Length, Task, Theme, font};
 
 use polars_core::prelude::DataFrame;
-use tatami::query::{self, Set, Tuple};
+use tatami::query::{self, MemberRef, Set, Tuple};
 use tatami::schema::{Name, Schema};
 use tatami::{Axes, Cube, Query, Results};
 use tatami_inmem::InMemoryCube;
@@ -69,6 +70,17 @@ struct App {
     rows: AxisPick,
     columns: AxisPick,
     metric: Option<MetricPick>,
+
+    /// Pinned members for dims *not currently on an axis*. Keyed by dim
+    /// index into `schema.dimensions`. Entries are pruned when the user
+    /// moves the same dim onto an axis — a dim can be "on rows" or "in the
+    /// slicer", never both.
+    slicer: HashMap<usize, MemberRef>,
+
+    /// Cached per-dim top-level members. Populated after schema arrival
+    /// by one [`InMemoryCube::level_members`] call per dim. Read-only
+    /// after initial load; picker options come from this map.
+    slicer_options: HashMap<usize, Vec<MemberRef>>,
 
     result: QueryState,
 }
@@ -142,6 +154,13 @@ enum Message {
     ColumnsLevelPicked(Option<LevelChoice>),
     /// Metric picker changed.
     MetricPicked(Option<MetricChoice>),
+    /// Per-dim top-level members loaded via
+    /// [`InMemoryCube::level_members`]. `usize` is the dim's index into
+    /// `schema.dimensions`; on error the string is the backend message.
+    SlicerMembersLoaded(usize, Result<Vec<MemberRef>, String>),
+    /// User picked (or cleared) the slicer pin for a dim. `None` means
+    /// "unpin this dim".
+    SlicerPicked(usize, Option<SlicerChoice>),
 }
 
 /// A dimension option in a pick_list. Stores the index into
@@ -186,6 +205,21 @@ impl fmt::Display for MetricChoice {
     }
 }
 
+/// A slicer option in a pick_list — a single top-level member of a dim
+/// *not currently on an axis*. Pinning seeds `Query.slicer` with this
+/// member; unpinning removes the dim from the slicer tuple.
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct SlicerChoice {
+    member: MemberRef,
+    label: String,
+}
+
+impl fmt::Display for SlicerChoice {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(&self.label)
+    }
+}
+
 // ── new / update / view ────────────────────────────────────────────────────
 
 impl App {
@@ -202,6 +236,8 @@ impl App {
             rows: AxisPick::None,
             columns: AxisPick::None,
             metric: None,
+            slicer: HashMap::new(),
+            slicer_options: HashMap::new(),
             result: QueryState::Idle,
         };
 
@@ -246,8 +282,13 @@ impl App {
                 Task::none()
             }
             Message::SchemaReady(schema) => {
+                // Kick off one `level_members` call per dim — populates
+                // `slicer_options` so the slicer pickers can render
+                // synchronously from cached data.
+                let tasks = load_slicer_options(self.cube.as_ref(), &schema);
                 self.schema_ref = Some(schema);
-                self.run_query()
+                let query_task = self.run_query();
+                Task::batch(std::iter::once(query_task).chain(tasks))
             }
             Message::QueryDone(Ok(results)) => {
                 self.result = QueryState::Ok(results);
@@ -264,6 +305,7 @@ impl App {
             }
             Message::RowsDimPicked(choice) => {
                 self.rows = axis_for(self.schema_ref.as_ref(), choice);
+                self.prune_slicer();
                 self.run_query()
             }
             Message::RowsLevelPicked(choice) => {
@@ -272,6 +314,7 @@ impl App {
             }
             Message::ColumnsDimPicked(choice) => {
                 self.columns = axis_for(self.schema_ref.as_ref(), choice);
+                self.prune_slicer();
                 self.run_query()
             }
             Message::ColumnsLevelPicked(choice) => {
@@ -280,6 +323,28 @@ impl App {
             }
             Message::MetricPicked(choice) => {
                 self.metric = choice.map(|c| c.pick);
+                self.run_query()
+            }
+            Message::SlicerMembersLoaded(dim_index, Ok(members)) => {
+                self.slicer_options.insert(dim_index, members);
+                Task::none()
+            }
+            Message::SlicerMembersLoaded(_dim_index, Err(error)) => {
+                // Failing to load one dim's members is non-fatal — the
+                // picker for that dim stays in its loading state and the
+                // rest of the UI works.
+                eprintln!("slicer members load failed: {error}");
+                Task::none()
+            }
+            Message::SlicerPicked(dim_index, choice) => {
+                match choice {
+                    Some(c) => {
+                        self.slicer.insert(dim_index, c.member);
+                    }
+                    None => {
+                        self.slicer.remove(&dim_index);
+                    }
+                }
                 self.run_query()
             }
         }
@@ -295,7 +360,14 @@ impl App {
 
         scrollable(
             row![
-                sidebar(schema, &self.rows, &self.columns, self.metric),
+                sidebar(
+                    schema,
+                    &self.rows,
+                    &self.columns,
+                    self.metric,
+                    &self.slicer,
+                    &self.slicer_options,
+                ),
                 widgets::result_panel(&self.result),
             ]
             .spacing(24)
@@ -314,7 +386,8 @@ impl App {
         let Some(cube) = self.cube.clone() else {
             return Task::none();
         };
-        let Some(query) = build_query(schema, &self.rows, &self.columns, self.metric) else {
+        let Some(query) = build_query(schema, &self.rows, &self.columns, self.metric, &self.slicer)
+        else {
             self.result = QueryState::Idle;
             return Task::none();
         };
@@ -323,6 +396,14 @@ impl App {
             let outcome = cube.query(&query).await.map_err(|e| e.to_string());
             Message::QueryDone(outcome)
         })
+    }
+
+    /// Drop slicer entries for dims that are now on rows or columns — a
+    /// dim can be "on an axis" or "in the slicer", never both.
+    fn prune_slicer(&mut self) {
+        let on_axis = axis_dim_set(&self.rows, &self.columns);
+        self.slicer
+            .retain(|dim_index, _| !on_axis.contains(dim_index));
     }
 }
 
@@ -336,6 +417,8 @@ fn sidebar<'a>(
     rows: &AxisPick,
     columns: &AxisPick,
     metric: Option<MetricPick>,
+    slicer: &HashMap<usize, MemberRef>,
+    slicer_options: &HashMap<usize, Vec<MemberRef>>,
 ) -> Element<'a, Message> {
     let dim_options: Vec<DimChoice> = schema
         .dimensions
@@ -403,10 +486,113 @@ fn sidebar<'a>(
     ]
     .spacing(6);
 
-    column![rows_block, columns_block, metric_block]
+    let slicer_block = slicer_panel(schema, rows, columns, slicer, slicer_options);
+
+    column![rows_block, columns_block, metric_block, slicer_block]
         .spacing(16)
         .width(Length::Fixed(260.0))
         .into()
+}
+
+/// Build the slicer shelf — one picker per dim *not* currently on rows or
+/// columns. Each picker lists that dim's top-level members (as cached in
+/// `slicer_options`), with an "Unbound" entry to clear the pin.
+fn slicer_panel<'a>(
+    schema: &'a Schema,
+    rows: &AxisPick,
+    columns: &AxisPick,
+    slicer: &HashMap<usize, MemberRef>,
+    slicer_options: &HashMap<usize, Vec<MemberRef>>,
+) -> Element<'a, Message> {
+    let on_axis = axis_dim_set(rows, columns);
+
+    let mut children: Vec<Element<'a, Message>> = vec![text("Slicer").size(13).into()];
+    let mut shown_any = false;
+    for (dim_index, dim) in schema.dimensions.iter().enumerate() {
+        if on_axis.contains(&dim_index) {
+            continue;
+        }
+        shown_any = true;
+        let picker = slicer_picker(dim_index, dim, slicer, slicer_options);
+        children.push(picker);
+    }
+    if !shown_any {
+        children.push(
+            text("(all dims on axes)")
+                .size(12)
+                .style(text::secondary)
+                .into(),
+        );
+    }
+    Column::with_children(children).spacing(8).into()
+}
+
+fn slicer_picker<'a>(
+    dim_index: usize,
+    dim: &'a tatami::schema::Dimension,
+    slicer: &HashMap<usize, MemberRef>,
+    slicer_options: &HashMap<usize, Vec<MemberRef>>,
+) -> Element<'a, Message> {
+    let label = dim.name.as_str().to_owned();
+    let header = text(label).size(12);
+
+    let Some(members) = slicer_options.get(&dim_index) else {
+        // Cached data not ready yet — render a placeholder instead of the
+        // picker. The `SchemaReady` handler fires one Task per dim, so
+        // this resolves as soon as that future lands.
+        return column![
+            header,
+            text("(loading\u{2026})").size(12).style(text::secondary),
+        ]
+        .spacing(4)
+        .into();
+    };
+
+    let options: Vec<SlicerChoice> = members
+        .iter()
+        .map(|m| SlicerChoice {
+            member: m.clone(),
+            label: m.path.to_string(),
+        })
+        .collect();
+
+    let selected = slicer
+        .get(&dim_index)
+        .and_then(|pinned| options.iter().find(|c| c.member == *pinned).cloned());
+
+    let picker = pick_list(selected, options, |c: &SlicerChoice| c.label.clone())
+        .on_select(move |c: SlicerChoice| Message::SlicerPicked(dim_index, Some(c)))
+        .placeholder("(unbound)")
+        .width(Length::Fill);
+
+    // Clear-pin control — visible only when something is pinned so the
+    // common case of "no pin" has one less widget on screen.
+    let clear: Element<'a, Message> = if slicer.contains_key(&dim_index) {
+        button(text("Clear").size(11))
+            .on_press(Message::SlicerPicked(dim_index, None))
+            .into()
+    } else {
+        text("").into()
+    };
+
+    column![
+        header,
+        row![picker, clear].spacing(6).align_y(Alignment::Center),
+    ]
+    .spacing(4)
+    .into()
+}
+
+/// Set of dim indices currently occupied by an axis pick.
+fn axis_dim_set(rows: &AxisPick, columns: &AxisPick) -> std::collections::HashSet<usize> {
+    let mut set = std::collections::HashSet::new();
+    if let AxisPick::Pick { dim, .. } = *rows {
+        set.insert(dim);
+    }
+    if let AxisPick::Pick { dim, .. } = *columns {
+        set.insert(dim);
+    }
+    set
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -572,15 +758,51 @@ fn build_query(
     rows: &AxisPick,
     columns: &AxisPick,
     metric: Option<MetricPick>,
+    slicer: &HashMap<usize, MemberRef>,
 ) -> Option<Query> {
     let axes = build_axes(schema, rows, columns)?;
     let metric = metric.and_then(|p| metric_name(schema, p))?;
+    // `Tuple::of` rejects duplicate-dim inputs; we never add two members
+    // for the same dim (the key is the dim's index into `schema.dimensions`,
+    // one entry per dim), so `.ok()` is sound here.
+    let slicer_tuple = Tuple::of(slicer.values().cloned()).ok()?;
     Some(Query {
         axes,
-        slicer: Tuple::empty(),
+        slicer: slicer_tuple,
         metrics: vec![metric],
         options: query::Options::default(),
     })
+}
+
+/// Spawn one [`InMemoryCube::level_members`] call per dim — the top-level
+/// members of each `(dim, hierarchies[0], levels[0])` triple are what the
+/// slicer pickers show. Returns one [`Task`] per dim with a schema +
+/// cube; empty if the cube isn't constructed yet or the schema has no
+/// dims.
+fn load_slicer_options(cube: Option<&Arc<InMemoryCube>>, schema: &Schema) -> Vec<Task<Message>> {
+    let Some(cube) = cube else {
+        return Vec::new();
+    };
+    let mut tasks = Vec::new();
+    for (dim_index, dim) in schema.dimensions.iter().enumerate() {
+        let Some(hierarchy) = dim.hierarchies.first() else {
+            continue;
+        };
+        let Some(level) = hierarchy.levels.first() else {
+            continue;
+        };
+        let dim_name = dim.name.clone();
+        let hierarchy_name = hierarchy.name.clone();
+        let level_name = level.name.clone();
+        let cube = cube.clone();
+        tasks.push(Task::future(async move {
+            let outcome = cube
+                .level_members(&dim_name, &hierarchy_name, &level_name)
+                .map_err(|e| e.to_string());
+            Message::SlicerMembersLoaded(dim_index, outcome)
+        }));
+    }
+    tasks
 }
 
 // ── Font loading ───────────────────────────────────────────────────────────
