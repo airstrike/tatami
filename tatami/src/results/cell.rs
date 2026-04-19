@@ -19,6 +19,8 @@ use crate::schema::{Format, Unit};
 /// choose to style "no facts" differently from "not applicable". `Error`
 /// carries a human-readable message for cells that could not be evaluated
 /// (division by zero, overflow, NaN input, etc.).
+///
+/// `#[non_exhaustive]` — matches must include a wildcard arm.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "state", rename_all = "snake_case")]
 #[non_exhaustive]

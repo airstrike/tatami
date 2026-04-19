@@ -114,6 +114,15 @@ impl Aggregation {
     /// Rejects empty `non_additive_dims` — that would be identical to full
     /// additive aggregation, and a caller who wanted that should write
     /// [`Aggregation::sum`] instead.
+    ///
+    /// ```
+    /// use tatami::schema::{Aggregation, Name, SemiAgg};
+    /// let agg = Aggregation::semi_additive(
+    ///     vec![Name::parse("Time").unwrap()],
+    ///     SemiAgg::Last,
+    /// ).unwrap();
+    /// assert!(matches!(agg, Aggregation::SemiAdditive { .. }));
+    /// ```
     pub fn semi_additive(non_additive_dims: Vec<Name>, over: SemiAgg) -> Result<Self, Error> {
         if non_additive_dims.is_empty() {
             return Err(Error::EmptyNonAdditiveDims);

@@ -1,16 +1,40 @@
 //! Polars-backed reference implementation of [`tatami::Cube`].
 //!
-//! v0.1 scaffold — Phase 5 of MAP_PLAN.md fills in real evaluation. Phase 5a
-//! added structural validation at [`InMemoryCube::new`] time: every measure
-//! and every dimension-level key must have a column of a sensible dtype in
-//! the fact [`DataFrame`]. Phase 5b (this file + [`catalogue`]) builds a
-//! per-hierarchy member tree once at construction time and answers
-//! [`InMemoryCube::members`] from it. Phase 5c ([`resolve`]) lifts the
-//! public [`Query`] into a crate-internal `ResolvedQuery` that carries
-//! schema-binding proofs; this is the only place in the pipeline where
-//! `Result` appears for ref-existence failures. Phase 5g wires the full
-//! set / metric / assembly pipeline into [`InMemoryCube::query`], making
-//! the cube end-to-end functional.
+//! [`InMemoryCube`] wraps a fact-source [`DataFrame`] plus a [`Schema`] and
+//! answers [`tatami::Query`] values end-to-end — set evaluation, tuple
+//! filtering, measure aggregation (including semi-additive rollup), metric
+//! expression evaluation (`Lag`, `PeriodsToDate`, `At`, arithmetic), and
+//! result assembly into the `Axes`-determined [`Results`] shape.
+//!
+//! # Validation: construction vs. query time
+//!
+//! [`InMemoryCube::new`] is fail-fast on everything the schema + frame
+//! can jointly decide up front:
+//!
+//! - Every [`tatami::schema::Measure`] has a same-named column with a
+//!   dtype acceptable to its [`tatami::schema::Aggregation`] (numeric
+//!   for `Sum`/`Avg`/`Min`/`Max`/`SemiAdditive`; `DistinctCount` also
+//!   tolerates strings).
+//! - Every level in every [`tatami::schema::Hierarchy`] has a key column
+//!   of a discrete-friendly dtype (integers or strings; floats are
+//!   rejected — equality is a footgun for hierarchy keys).
+//! - A one-shot scan builds a per-`(dim, hierarchy)` member catalogue,
+//!   surfacing `MalformedMemberValue` on any cell that fails
+//!   [`tatami::schema::Name::parse`].
+//!
+//! Query-dependent checks are deferred to [`InMemoryCube::query`], where
+//! a `Query → ResolvedQuery` step binds refs to schema handles: metric /
+//! measure name resolution, `Lag`'s dim must be time, `PeriodsToDate`'s
+//! level must appear in a time hierarchy, cross-join sides must address
+//! disjoint dims, named-set references must resolve without cycles.
+//! These surface as `ResolveUnresolved*` / `ResolveUnknown*` / `Resolve…`
+//! variants of [`Error`].
+//!
+//! # See also
+//!
+//! `examples/hewton/` exercises the full pipeline against ~2,300 rows of
+//! synthetic hotel-sales data — the target surface every change to this
+//! crate is measured against.
 
 mod catalogue;
 mod eval;
@@ -405,7 +429,7 @@ pub enum Error {
     // that runtime are the one internal boundary where `Result` is
     // appropriate inside the eval pipeline (MAP §0.5).
     /// A polars filter call surfaced an error while materialising the
-    /// boolean mask for a [`crate::resolve::ResolvedTuple`].
+    /// boolean mask for a resolved tuple.
     #[error("tuple evaluation: polars filter failed: {reason}")]
     EvalFilterFailed {
         /// The polars error text.

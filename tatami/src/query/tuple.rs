@@ -46,6 +46,16 @@ impl Tuple {
 
     /// Boundary constructor. Rejects any collection that binds the same dim
     /// more than once.
+    ///
+    /// ```
+    /// use tatami::schema::Name;
+    /// use tatami::{MemberRef, Tuple};
+    /// let t = Tuple::of([
+    ///     MemberRef::time(Name::parse("FY2026").unwrap()),
+    ///     MemberRef::scenario(Name::parse("Actual").unwrap()),
+    /// ]).unwrap();
+    /// assert_eq!(t.len(), 2);
+    /// ```
     pub fn of<I>(iter: I) -> Result<Self, Error>
     where
         I: IntoIterator<Item = MemberRef>,

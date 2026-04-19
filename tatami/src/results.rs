@@ -25,6 +25,10 @@ use serde::{Deserialize, Serialize};
 /// Closed sum of the four result shapes. The `Axes` variant of the original
 /// [`crate::Query`] determines which variant the backend returns (mapping
 /// documented in MAP §3.3).
+///
+/// `#[non_exhaustive]` — downstream matches must include a wildcard arm.
+/// Adding a shape is a non-breaking change; the renderer must either
+/// handle the new variant or fall through.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[non_exhaustive]
 #[serde(rename_all = "snake_case")]

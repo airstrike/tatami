@@ -20,7 +20,7 @@ use crate::schema::Name;
 /// Invariant: at least one segment. Construct via [`Path::of`] (total),
 /// [`Path::with`] (total), or [`Path::parse`] (boundary).
 ///
-/// [`Display`] joins segments with `/`.
+/// [`fmt::Display`] joins segments with `/`.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct Path {
     head: Name,
@@ -29,6 +29,13 @@ pub struct Path {
 
 impl Path {
     /// Total constructor: a path of exactly one segment.
+    ///
+    /// ```
+    /// use tatami::schema::Name;
+    /// use tatami::Path;
+    /// let p = Path::of(Name::parse("FY2026").unwrap());
+    /// assert_eq!(p.len(), 1);
+    /// ```
     #[must_use]
     pub fn of(head: Name) -> Self {
         Self {

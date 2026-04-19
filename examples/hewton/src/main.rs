@@ -7,22 +7,12 @@
 //! Hewton is a hotel-sales cube — US states × brand tier × channel × segment
 //! × month, with `amount`, `room_nights_sold`, and `rooms_available`
 //! measures and derived metrics (Revenue, ADR, Occupancy, RevPAR, YoY, MoM).
-//! It demonstrates all four `Results` shapes against one schema:
+//! Four example queries exercise the `Results` shapes against one schema:
 //!
 //! - **Scalar**   — FY2026 Revenue + MoM delta.
 //! - **Pivot**    — Quarterly Revenue by Region, FY2025–FY2030.
 //! - **Pivot**    — AOP Plan vs What-If by line item.
-//! - **Rollup**   — Sales volume by territory, World → Region → Country.
-//!
-//! ## Compilation status
-//!
-//! May not compile until the following land:
-//! - Phase 3  — `tatami::Cube` trait + `tatami::Results` enum.
-//! - Phase 4  — `tatami_inmem::InMemoryCube` scaffold (workspace member +
-//!   `InMemoryCube::new(df, schema)`).
-//! - Phase 5  — real `cube.query(&q).await` evaluation.
-//!
-//! The compile errors against this file are the phase checklist.
+//! - **Series**   — Sales volume by territory, World → Region → Country.
 //!
 //! ## North star
 //!

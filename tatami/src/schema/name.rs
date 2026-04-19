@@ -20,6 +20,13 @@ impl Name {
     /// Rejects empty strings, strings that contain only whitespace, strings
     /// with leading or trailing whitespace, and strings containing control
     /// characters (including `\n`, `\r`, `\t`).
+    ///
+    /// ```
+    /// use tatami::schema::Name;
+    /// assert_eq!(Name::parse("Revenue").unwrap().as_str(), "Revenue");
+    /// assert!(Name::parse("").is_err());
+    /// assert!(Name::parse(" leading").is_err());
+    /// ```
     pub fn parse(s: &str) -> Result<Self, Error> {
         if s.is_empty() {
             return Err(Error::Empty);

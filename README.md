@@ -53,6 +53,32 @@ Future siblings (out of scope for v0.1): `tatami-polars-lazy`,
 4. **Example-first.** The Hewton example is the acceptance spec — any
    API change that breaks it needs explicit sign-off.
 
+## The algebra
+
+`tatami`'s query surface is a two-level algebra, joined by tuple-context
+evaluation:
+
+- **Set algebra over cube members** (`Set`, 10 constructors, closed under
+  combination). Atoms: `Members`, `Range`, `Named`, `Explicit`. Unary
+  combinators: `Children`, `Descendants`, `Filter`, `TopN`. Binary:
+  `CrossJoin`, `Union`. The combinator methods on `Set` pipe — the
+  shape reads top-down as
+  `world.descendants_to(Country).filter(revenue_gt_threshold)` rather
+  than as nested struct literals.
+- **Expression algebra over cube cells** (`Expr`, 6 constructors).
+  Terminals: `Ref`, `Const`. Binary operators: `Binary`. Coordinate
+  transforms: `Lag`, `PeriodsToDate`, `At`. Composes to YoY, QTD,
+  variance, what-if — all as tree nodes over a tuple context.
+
+`Cube::query` is a homomorphism from the query algebra into the
+`Results` algebra: every backend must be _observationally equivalent_
+on the algebra against the reference `InMemoryCube`. Eighteen
+algebraic laws (Union commutativity, CrossJoin associativity, Filter
+push-through, TopN collapse, Descendants-of-Union, …) are verified as
+proptests in `tatami-inmem/tests/laws.rs` — empirical in v0.1,
+candidates for the public contract in v0.2 once a second backend
+stress-tests them.
+
 ## Example
 
 ```rust
@@ -100,6 +126,49 @@ Opens an iced window with four cards — a Scalar KPI, two Pivot variants
 (one promoted to Rollup because the rows axis is `Descendants`), and a
 Series — backed by ~2,300 rows of synthetic hotel-sales data loaded from
 `examples/hewton/assets/hewton.csv`.
+
+## Implementing a backend
+
+The `Cube` trait is three async methods:
+
+```rust
+pub trait Cube: Send + Sync {
+    type Error: std::error::Error + Send + Sync + 'static;
+
+    async fn schema (&self) -> Result<Schema, Self::Error>;
+    async fn query  (&self, q: &Query) -> Result<Results, Self::Error>;
+    async fn members(
+        &self,
+        dim:       &Name,
+        hierarchy: &Name,
+        at:        &MemberRef,
+        relation:  MemberRelation,
+    ) -> Result<Vec<MemberRef>, Self::Error>;
+}
+```
+
+The canonical internal pipeline is `Query → ResolvedQuery → Results`
+(see `tatami-inmem/src/resolve.rs` for the reference shape):
+
+1. **Resolve.** Lift the public `Query` into a backend-internal
+   `ResolvedQuery` that carries schema-binding proofs — every
+   `Expr::Ref { name }` bound to a measure/metric handle, every
+   `CrossJoin` verified disjoint, every `Lag { dim, .. }` confirmed as
+   a `Time` dim. **This is the only place in the pipeline where
+   ref-existence `Result`s appear.** Evaluation sees only
+   `ResolvedQuery` and cannot fail for those reasons.
+2. **Evaluate.** Walk `ResolvedAxes` → concrete tuples, walk `Expr` →
+   cells, assemble the `Results` shape per the `Axes` variant
+   (§3.3 of the MAP has the mapping table — Scalar / Series / Pivot /
+   Rollup).
+
+**Correctness target: observational equivalence with `tatami-inmem`**.
+Copy `tatami-inmem/tests/laws.rs` into your backend's `tests/`
+directory and run it against your `Cube` impl; every law should pass.
+Diverging behaviour means either the law is wrong (update MAP §3.7) or
+the implementation is (fix the backend). Phase 5i of the v0.1 MAP
+caught one (`PeriodsToDate` idempotence under sum semantics) and
+tightened another (`Lag` of `Const` in the in-range case).
 
 ## Prior art
 

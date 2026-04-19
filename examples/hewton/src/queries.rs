@@ -41,7 +41,7 @@ impl ExampleQuery {
             Self::FyRevenue => "Single-cell KPI with MoM delta — Results::Scalar",
             Self::QuarterlyByRegion => "FY2025–FY2030 × regions — Results::Pivot",
             Self::PlanVsWhatIf => "Variance table across scenarios — Results::Pivot",
-            Self::WorldToCountry => "World → Region → Country drilldown — Results::Rollup",
+            Self::WorldToCountry => "World → Region → Country drilldown — Results::Series",
         }
     }
 
@@ -114,7 +114,7 @@ fn variance_pivot() -> Query {
     }
 }
 
-// ── §3.5(d) Rollup — descendants of a member ───────────────────────────────
+// ── §3.5(d) Series — descendants of a member along an axis ─────────────────
 
 fn rollup_by_territory() -> Query {
     Query {

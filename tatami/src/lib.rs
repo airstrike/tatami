@@ -1,30 +1,64 @@
-//! `tatami` — backend-agnostic multidimensional cube trait.
+//! Backend-agnostic multidimensional cube trait — schema, query algebra,
+//! typed result shapes, and the [`Cube`] trait every OLAP backend
+//! implements against. The reference implementation lives in
+//! [`tatami-inmem`](https://docs.rs/tatami-inmem) (Polars-backed);
+//! `examples/hewton/` is the frozen target API.
 //!
-//! This crate provides the type vocabulary (schema, query, results — Phase 2
-//! ships schema + query) that concrete OLAP backends implement against.
-//! See `.claude/map/v0-1/MAP_PLAN.md` for the design rationale.
+//! # Mental model
 //!
-//! # Phase 2 scope
+//! A cube is a function `f: D₁ × D₂ × … × Dₙ → Measures`. Dimensions
+//! define a space; a [`Query`] picks a subspace (the [`Query::slicer`])
+//! and specifies an axis projection (rows / columns / pages) as sets of
+//! tuples. The result is a typed grid, not a bag of rows.
 //!
-//! - Opaque scalar types: [`schema::Name`], [`schema::Unit`],
-//!   [`schema::Format`], [`schema::MonthDay`].
-//! - Schema product types: [`Schema`], [`schema::Dimension`],
-//!   [`schema::Measure`], [`schema::Metric`], [`schema::NamedSet`] and their
-//!   components.
-//! - Query types: [`Query`], [`Axes`], [`Tuple`], [`Path`], [`Set`],
-//!   [`MemberRef`], [`Predicate`], [`query::Options`].
-//! - A typestate [`Schema::builder`] that makes partial schemas fail to
-//!   compile.
+//! Three transformation stages — separate types, one per stage — carry a
+//! query from wire form to evaluated result:
 //!
-//! Phase 3 adds the Results + Cube trait surface.
+//! 1. [`Query`] — shape-valid, serde-roundtrippable; refs are raw [`schema::Name`] values.
+//! 2. `ResolvedQuery` (crate-internal to each backend) — refs bound to
+//!    schema handles; structural checks (cross-join disjointness,
+//!    hierarchy existence) done.
+//! 3. [`Results`] — a closed sum over the four result shapes.
 //!
-//! # Phase 3 additions
+//! `Query → ResolvedQuery → Results` is three types, not one type with
+//! a status field. The library's invariants are structural: if you can
+//! construct a value, it is already valid.
 //!
-//! - Result shapes under [`results`]: [`scalar::Result`],
-//!   [`series::Result`], [`pivot::Result`], [`rollup::Tree`].
-//! - [`Cell`] (Valid / Missing / Error) and [`missing::Reason`].
-//! - The closed [`Results`] sum over the four shapes.
-//! - The [`Cube`] trait with native `async fn` + [`MemberRelation`].
+//! # Types at a glance
+//!
+//! **Schema layer** — [`Schema`], built through a typestate
+//! [`Schema::builder`] that makes partial schemas a compile error:
+//! [`schema::Dimension`] (regular / time / scenario), [`schema::Measure`]
+//! with [`schema::Aggregation`] (sum, avg, semi-additive, …),
+//! [`schema::Metric`] carrying an [`Expr`] formula tree,
+//! [`schema::NamedSet`]. Opaque scalar types [`schema::Name`],
+//! [`schema::Unit`], [`schema::Format`], [`schema::MonthDay`] validate at
+//! the boundary.
+//!
+//! **Query layer** — [`Query`] composes [`Axes`] (the four projection
+//! shapes Scalar / Series / Pivot / Pages), a [`Tuple`] slicer,
+//! [`MemberRef`] coordinates, [`Path`] segment lists, and the [`Set`]
+//! algebra (Members / Children / Descendants / Range / CrossJoin /
+//! Union / Filter / TopN / Named / Explicit). Tidy-style combinator
+//! methods (`set.descendants_to(level)`, `set.filter(pred)`) sit next
+//! to the variant constructors.
+//!
+//! **Result layer** — the closed [`Results`] sum over [`scalar::Result`]
+//! (KPI tile), [`series::Result`] (line / bar chart),
+//! [`pivot::Result`] (2-D grid), and [`rollup::Tree`] (hierarchical).
+//! Each cell is a [`Cell`] — `Valid` / `Missing` (with a typed
+//! [`missing::Reason`]) / `Error`.
+//!
+//! **Backend surface** — the [`Cube`] trait with three async methods
+//! ([`Cube::schema`], [`Cube::query`], [`Cube::members`]), plus
+//! [`MemberRelation`] as the navigation verb fed to `Cube::members`.
+//!
+//! # Further reading
+//!
+//! - `examples/hewton/` — a worked hotel-sales cube that exercises every
+//!   public type against ~2,300 rows of synthetic data.
+//! - The crate's `README.md` has a short example and pointers to the
+//!   OLAP prior art this design draws on.
 
 #![warn(missing_docs)]
 
