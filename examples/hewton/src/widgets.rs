@@ -5,7 +5,7 @@
 //! card`, `Series → Mark::Line`, `Pivot → sweeten::widget::table`, `Rollup →
 //! Mark::Choropleth / Mark::BubbleMap`.
 
-use iced::widget::{Column, column, container, row, rule, scrollable, text};
+use iced::widget::{Column, column, container, row, scrollable, text};
 use iced::{Alignment, Element, Font, Length, Padding, font};
 use sweeten::widget::table;
 
@@ -24,32 +24,21 @@ const BOLD: Font = Font {
     optical_size: font::OpticalSize::None,
 };
 
-/// One rendered card — heading, subtitle, and a body keyed off the query's
-/// current `QueryState` (running / ok / error).
-pub fn card<'a>(
-    heading: &'static str,
-    subtitle: &'static str,
-    state: Option<&'a QueryState>,
-) -> Element<'a, Message> {
-    let body: Element<'a, Message> = match state {
-        None => text("(no task)").into(),
-        Some(QueryState::Running) => text("Running…").into(),
-        Some(QueryState::Err(message)) => text(format!("Error: {message}")).size(14).into(),
-        Some(QueryState::Ok(results)) => render(results),
+/// A panel wrapping the current query's outcome — loading, error, or the
+/// rendered `Results`. Schema-blind: the panel content is entirely derived
+/// from the runtime `QueryState`.
+pub fn result_panel(state: &QueryState) -> Element<'_, Message> {
+    let body: Element<'_, Message> = match state {
+        QueryState::Idle => text("Pick row/column/metric to run a query.").into(),
+        QueryState::Running => text("Running\u{2026}").into(),
+        QueryState::Err(message) => text(format!("Error: {message}")).size(14).into(),
+        QueryState::Ok(results) => render(results),
     };
 
-    container(
-        column![
-            text(heading).font(BOLD).size(18),
-            text(subtitle).size(12).style(theme::muted),
-            rule::horizontal(8),
-            body,
-        ]
-        .spacing(8),
-    )
-    .padding(Padding::from(16))
-    .style(theme::card)
-    .into()
+    container(body)
+        .padding(Padding::from(16))
+        .style(theme::card)
+        .into()
 }
 
 /// The exhaustive `Results` match — this is the payoff of §3.3's closed

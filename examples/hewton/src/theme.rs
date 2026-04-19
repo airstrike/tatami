@@ -5,6 +5,7 @@
 use iced::widget::container;
 use iced::{Background, Border, Color, Shadow, Theme, Vector, color};
 
+/// Card container style — background, border, soft drop shadow.
 pub fn card(theme: &Theme) -> container::Style {
     let palette = theme.palette();
     container::Style {
@@ -21,11 +22,5 @@ pub fn card(theme: &Theme) -> container::Style {
         },
         text_color: Some(palette.background.base.text),
         ..Default::default()
-    }
-}
-
-pub fn muted(theme: &Theme) -> iced::widget::text::Style {
-    iced::widget::text::Style {
-        color: Some(theme.palette().background.base.text.scale_alpha(0.6)),
     }
 }
