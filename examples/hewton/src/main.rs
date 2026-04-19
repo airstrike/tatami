@@ -54,7 +54,7 @@ pub const INTER: Font = Font {
 
 fn main() -> iced::Result {
     iced::application(App::new, App::update, App::view)
-        .theme(|_: &App| Theme::Light)
+        .theme(Theme::Oxocarbon)
         .default_font(INTER)
         .font(icon::FONT)
         .window_size((1200.0, 800.0))
@@ -125,7 +125,29 @@ struct App {
     /// after initial load; picker options come from this map.
     slicer_options: HashMap<usize, Vec<MemberRef>>,
 
+    /// History of pre-drill composer states. [`Message::DrillInto`]
+    /// pushes a [`ComposerSnapshot`] before mutating the composer;
+    /// [`Message::Back`] pops and restores. The trail is a plain stack —
+    /// no forward / redo discipline in v1.
+    trail: Vec<ComposerSnapshot>,
+
     result: QueryState,
+}
+
+/// Snapshot of every picker field — enough to reconstitute the composer
+/// after a drill. Pushed onto [`App::trail`] before drilling; popped by
+/// [`Message::Back`] to restore the pre-drill view exactly.
+#[derive(Clone)]
+struct ComposerSnapshot {
+    rows: AxisPick,
+    columns: AxisPick,
+    metrics: Vec<Option<MetricPick>>,
+    top_n_by: Option<MetricPick>,
+    filter: Option<FilterPick>,
+    filter_kind: Option<FilterKind>,
+    filter_by: Option<MetricPick>,
+    filter_value_text: String,
+    slicer: HashMap<usize, MemberRef>,
 }
 
 /// An axis choice, sourced entirely from schema indices. `None` means the
@@ -264,6 +286,12 @@ enum Message {
     /// User picked (or cleared) the slicer pin for a dim. `None` means
     /// "unpin this dim".
     SlicerPicked(usize, Option<SlicerChoice>),
+    /// User clicked a pivot row header to drill into that member — pin
+    /// it in the slicer and advance the rows axis one level deeper.
+    DrillInto(MemberRef),
+    /// User clicked the Back arrow — pop the trail and restore the last
+    /// pre-drill snapshot.
+    Back,
 }
 
 /// A dimension option in a pick_list. Stores the index into
@@ -367,6 +395,7 @@ impl App {
             filter_value_text: String::new(),
             slicer: HashMap::new(),
             slicer_options: HashMap::new(),
+            trail: Vec::new(),
             result: QueryState::Idle,
         };
 
@@ -520,6 +549,14 @@ impl App {
                 }
                 self.run_query()
             }
+            Message::DrillInto(member) => self.drill(member),
+            Message::Back => {
+                if let Some(snap) = self.trail.pop() {
+                    self.restore(snap);
+                    return self.run_query();
+                }
+                Task::none()
+            }
         }
     }
 
@@ -535,21 +572,32 @@ impl App {
         // overflows vertically without also pushing the result panel up
         // or down. The result panel fills the remaining space so it
         // doesn't collapse to the height of a "Running…" label.
+        let sidebar_body = sidebar(
+            schema,
+            &self.rows,
+            &self.columns,
+            &self.metrics,
+            self.top_n_by,
+            self.filter_kind,
+            self.filter_by,
+            &self.filter_value_text,
+            &self.slicer,
+            &self.slicer_options,
+        );
+
+        // Back arrow sits at the top of the sidebar and is visible only
+        // when there's drill history to pop. One control, one decision —
+        // no forward stack in v1.
+        let sidebar_column: Element<'_, Message> = if self.trail.is_empty() {
+            sidebar_body
+        } else {
+            column![back_button(), sidebar_body].spacing(10).into()
+        };
+
         row![
-            scrollable(sidebar(
-                schema,
-                &self.rows,
-                &self.columns,
-                &self.metrics,
-                self.top_n_by,
-                self.filter_kind,
-                self.filter_by,
-                &self.filter_value_text,
-                &self.slicer,
-                &self.slicer_options,
-            ))
-            .width(Length::Fixed(280.0))
-            .height(Length::Fill),
+            scrollable(sidebar_column)
+                .width(Length::Fixed(280.0))
+                .height(Length::Fill),
             widgets::result_panel(&self.result),
         ]
         .spacing(16)
@@ -588,10 +636,102 @@ impl App {
 
     /// Drop slicer entries for dims that are now on rows or columns — a
     /// dim can be "on an axis" or "in the slicer", never both.
+    ///
+    /// Drill pins an axis dim in the slicer on purpose (see [`App::drill`]);
+    /// it bypasses this helper. Calls are limited to the dim-picker paths,
+    /// where a user actively chose to move a dim onto an axis and would
+    /// be surprised to see a stale pin dangling on the same dim.
     fn prune_slicer(&mut self) {
         let on_axis = axis_dim_set(&self.rows, &self.columns);
         self.slicer
             .retain(|dim_index, _| !on_axis.contains(dim_index));
+    }
+
+    /// Snapshot the entire composer — everything a drill might mutate.
+    fn snapshot(&self) -> ComposerSnapshot {
+        ComposerSnapshot {
+            rows: self.rows,
+            columns: self.columns,
+            metrics: self.metrics.clone(),
+            top_n_by: self.top_n_by,
+            filter: self.filter,
+            filter_kind: self.filter_kind,
+            filter_by: self.filter_by,
+            filter_value_text: self.filter_value_text.clone(),
+            slicer: self.slicer.clone(),
+        }
+    }
+
+    /// Restore the composer to a previously-captured snapshot. Mirrors
+    /// [`App::snapshot`] field-for-field.
+    fn restore(&mut self, snap: ComposerSnapshot) {
+        self.rows = snap.rows;
+        self.columns = snap.columns;
+        self.metrics = snap.metrics;
+        self.top_n_by = snap.top_n_by;
+        self.filter = snap.filter;
+        self.filter_kind = snap.filter_kind;
+        self.filter_by = snap.filter_by;
+        self.filter_value_text = snap.filter_value_text;
+        self.slicer = snap.slicer;
+    }
+
+    /// Drill into a pivot row member: push the current snapshot, pin the
+    /// clicked member in the slicer (even if its dim is on the rows axis
+    /// — the slicer + advanced rows level together express "children of
+    /// this member"), and advance the rows-axis level by one.
+    ///
+    /// No-op (no trail push, no mutation) when the click doesn't
+    /// correspond to a known schema dim, or when the rows axis is
+    /// already at its deepest level. Both branches silently ignore the
+    /// click rather than pushing a snapshot that would restore to
+    /// exactly the current state.
+    fn drill(&mut self, member: MemberRef) -> Task<Message> {
+        let Some(schema) = self.schema_ref.as_ref() else {
+            return Task::none();
+        };
+        // Map the clicked member's dim Name back to its schema index —
+        // the slicer is keyed by index. If the dim isn't found we bail.
+        let Some(dim_index) = schema.dimensions.iter().position(|d| d.name == member.dim) else {
+            return Task::none();
+        };
+        // Only advance the rows level when the clicked member's dim is
+        // the rows axis dim at the current level — otherwise we'd be
+        // pinning a slicer without moving the axis, which is just a
+        // slicer pin (the user can do that in the sidebar).
+        let AxisPick::Pick {
+            dim,
+            hierarchy,
+            level,
+        } = self.rows
+        else {
+            return Task::none();
+        };
+        if dim != dim_index {
+            return Task::none();
+        }
+        let Some(hier) = schema
+            .dimensions
+            .get(dim)
+            .and_then(|d| d.hierarchies.get(hierarchy))
+        else {
+            return Task::none();
+        };
+        if level + 1 >= hier.levels.len() {
+            // Already at the deepest level — drill is a no-op. We
+            // intentionally don't push an identity snapshot; Back then
+            // keeps meaning "undo the last real drill".
+            return Task::none();
+        }
+
+        self.trail.push(self.snapshot());
+        self.slicer.insert(dim_index, member);
+        self.rows = AxisPick::Pick {
+            dim,
+            hierarchy,
+            level: level + 1,
+        };
+        self.run_query()
     }
 
     /// Materialize `self.filter` from the three scratch fields. Only
@@ -730,6 +870,16 @@ fn inline_label<'a, M: 'a>(label: impl Into<String>) -> Element<'a, M> {
         .size(TEXT_SIZE)
         .style(theme::muted)
         .width(Length::Fixed(INLINE_LABEL_WIDTH))
+        .into()
+}
+
+/// Drill-Back affordance — a small chevron-left icon button that pops
+/// the last snapshot off [`App::trail`]. Rendered only when there is
+/// history to pop; see [`App::view`].
+fn back_button<'a>() -> Element<'a, Message> {
+    button(icon::chevron_left().size(ICON_SIZE))
+        .padding(ICON_BUTTON_PADDING)
+        .on_press(Message::Back)
         .into()
 }
 
@@ -899,30 +1049,28 @@ fn filter_panel<'a>(
     .into()
 }
 
-/// Build the slicer shelf — one picker per dim *not* currently on rows or
-/// columns. Each picker lists that dim's top-level members (as cached in
-/// `slicer_options`), with an "Unbound" entry to clear the pin.
+/// Build the slicer shelf — one picker for *every* dim, regardless of
+/// whether the dim is currently on rows or columns. The old rule hid
+/// axis-dim pickers to enforce "a dim is on an axis OR in the slicer,
+/// never both", but drill deliberately pins an axis dim in the slicer
+/// (axis at level L+1 plus slicer pinned at level L gives "children of
+/// that member"). Hiding the picker would make that state invisible to
+/// the user — and unreachable by a manual pin, which drill is the
+/// programmatic form of.
 fn slicer_panel<'a>(
     schema: &'a Schema,
-    rows: &AxisPick,
-    columns: &AxisPick,
+    _rows: &AxisPick,
+    _columns: &AxisPick,
     slicer: &HashMap<usize, MemberRef>,
     slicer_options: &HashMap<usize, Vec<MemberRef>>,
 ) -> Element<'a, Message> {
-    let on_axis = axis_dim_set(rows, columns);
-
     let mut children: Vec<Element<'a, Message>> = vec![heading("Slicer")];
-    let mut shown_any = false;
     for (dim_index, dim) in schema.dimensions.iter().enumerate() {
-        if on_axis.contains(&dim_index) {
-            continue;
-        }
-        shown_any = true;
         let picker = slicer_picker(dim_index, dim, slicer, slicer_options);
         children.push(picker);
     }
-    if !shown_any {
-        children.push(hint("(all dims on axes)"));
+    if schema.dimensions.is_empty() {
+        children.push(hint("(schema has no dims)"));
     }
     Column::with_children(children).spacing(6).into()
 }

@@ -5,10 +5,11 @@
 //! card`, `Series → Mark::Line`, `Pivot → sweeten::widget::table`, `Rollup →
 //! Mark::Choropleth / Mark::BubbleMap`.
 
-use iced::widget::{Column, column, container, row, scrollable, text};
+use iced::widget::{Column, button, column, container, row, scrollable, text};
 use iced::{Alignment, Element, Font, Length, Padding, font};
 use sweeten::widget::table;
 
+use tatami::query::MemberRef;
 use tatami::{Cell, Results, Tuple, pivot, rollup, scalar, series};
 
 use crate::theme;
@@ -90,9 +91,17 @@ fn render_series(r: &series::Result) -> Element<'_, Message> {
 /// A pre-formatted pivot row. Cells are pre-stringified so the column
 /// closures are pure indexed lookups. `Clone` is required by
 /// `sweeten::widget::table` — cheap since all fields are `String`.
+///
+/// `header_member` carries the *schema-bound* [`MemberRef`] behind the
+/// stringified `header`, so the drill-down button can emit
+/// [`Message::DrillInto`] without the widget layer ever parsing names.
+/// `None` only when a pivot row has zero members in its row tuple, which
+/// the backend does not currently produce — but we stay defensive and
+/// render a plain label in that case.
 #[derive(Clone)]
 struct PivotRow {
     header: String,
+    header_member: Option<MemberRef>,
     cells: Vec<String>,
 }
 
@@ -103,14 +112,35 @@ fn render_pivot(r: &pivot::Result) -> Element<'_, Message> {
         .zip(r.cells().iter())
         .map(|(h, cs)| PivotRow {
             header: format_tuple(h),
+            // Typically a single member per row tuple (the rows-axis
+            // member); deeper composite axes would still drill on the
+            // first member, which is the one the rows axis pick names.
+            header_member: h.members().first().cloned(),
             cells: cs.iter().map(format_cell).collect(),
         })
         .collect();
 
-    // Column 0 — the row header. Bold text, left-aligned.
+    // Column 0 — the row header. Wrapped in a text-styled button so a
+    // click emits `Message::DrillInto(member)`. The `button::text` style
+    // drops the border and background so it still reads as a header
+    // cell; alignment stays left-driven by `sweeten::widget::table`'s
+    // default `Alignment::Start` on this column.
+    //
+    // NOTE: Clicking a rollup-tree node is the obvious next iteration —
+    // same pattern (push snapshot, pin member, drill).
     let header_column = table::column(
         Some(Element::from(text("").font(BOLD))),
-        |row: PivotRow| -> Element<'_, Message> { text(row.header).font(BOLD).into() },
+        |row: PivotRow| -> Element<'_, Message> {
+            let label = text(row.header).font(BOLD);
+            match row.header_member {
+                Some(member) => button(label)
+                    .on_press(Message::DrillInto(member))
+                    .padding(0)
+                    .style(button::text)
+                    .into(),
+                None => label.into(),
+            }
+        },
     );
 
     // One data column per col_header. Each closure captures `i` by copy

@@ -6,5 +6,6 @@ module = "icon"
 # file.
 
 [icons]
-plus  = "plus"
-close = "x"
+plus          = "plus"
+close         = "x"
+chevron_left  = "chevron-left"
