@@ -21,6 +21,7 @@
 
 use std::collections::HashMap;
 use std::fmt;
+use std::num::NonZeroUsize;
 use std::sync::Arc;
 
 use iced::widget::{Column, button, center, column, pick_list, row, scrollable, text};
@@ -69,7 +70,19 @@ struct App {
 
     rows: AxisPick,
     columns: AxisPick,
-    metric: Option<MetricPick>,
+
+    /// Zero or more metric slots. Each slot is independently `None`
+    /// (visible empty picker) or `Some(pick)`. The query fires only once
+    /// every slot is filled; empty slots block it. We start with zero
+    /// slots at boot and push one on [`Message::SchemaReady`] so the user
+    /// lands on a visible picker without hunting for "+ Add metric".
+    metrics: Vec<Option<MetricPick>>,
+
+    /// When `Some`, [`build_query`] wraps the rows axis in
+    /// `Set::top(rows, 10, by)`. N is hard-coded at 10 for v1 — a number
+    /// input is a later iteration. The picker is inert whenever the rows
+    /// axis is absent; the user will see the rows picker light up first.
+    top_n_by: Option<MetricPick>,
 
     /// Pinned members for dims *not currently on an axis*. Keyed by dim
     /// index into `schema.dimensions`. Entries are pruned when the user
@@ -152,8 +165,18 @@ enum Message {
     ColumnsDimPicked(Option<DimChoice>),
     /// Columns level picker changed.
     ColumnsLevelPicked(Option<LevelChoice>),
-    /// Metric picker changed.
-    MetricPicked(Option<MetricChoice>),
+    /// A metric slot picker changed. `slot` is the slot's index into
+    /// `App.metrics`; `pick` is `None` when the user clears the slot.
+    MetricSlotPicked {
+        slot: usize,
+        pick: Option<MetricChoice>,
+    },
+    /// "+ Add metric" clicked — appends an empty slot to `App.metrics`.
+    MetricSlotAdded,
+    /// "×" clicked on a metric slot — removes the slot at this index.
+    MetricSlotRemoved(usize),
+    /// Top-N by-metric picker changed. `None` turns Top-N off.
+    TopNByPicked(Option<MetricChoice>),
     /// Per-dim top-level members loaded via
     /// [`InMemoryCube::level_members`]. `usize` is the dim's index into
     /// `schema.dimensions`; on error the string is the backend message.
@@ -235,7 +258,11 @@ impl App {
             load_error: None,
             rows: AxisPick::None,
             columns: AxisPick::None,
-            metric: None,
+            // No slots at boot — the schema isn't loaded yet, so a picker
+            // would have nothing to show. One empty slot is pushed on
+            // `SchemaReady`.
+            metrics: Vec::new(),
+            top_n_by: None,
             slicer: HashMap::new(),
             slicer_options: HashMap::new(),
             result: QueryState::Idle,
@@ -287,6 +314,11 @@ impl App {
                 // synchronously from cached data.
                 let tasks = load_slicer_options(self.cube.as_ref(), &schema);
                 self.schema_ref = Some(schema);
+                // Seed one empty metric slot so the user sees a picker
+                // without hunting for "+ Add metric".
+                if self.metrics.is_empty() {
+                    self.metrics.push(None);
+                }
                 let query_task = self.run_query();
                 Task::batch(std::iter::once(query_task).chain(tasks))
             }
@@ -321,8 +353,25 @@ impl App {
                 self.columns = level_for(&self.columns, choice);
                 self.run_query()
             }
-            Message::MetricPicked(choice) => {
-                self.metric = choice.map(|c| c.pick);
+            Message::MetricSlotPicked { slot, pick } => {
+                if let Some(entry) = self.metrics.get_mut(slot) {
+                    *entry = pick.map(|c| c.pick);
+                }
+                self.run_query()
+            }
+            Message::MetricSlotAdded => {
+                self.metrics.push(None);
+                // Empty slot blocks the query — `run_query` goes Idle.
+                self.run_query()
+            }
+            Message::MetricSlotRemoved(slot) => {
+                if slot < self.metrics.len() {
+                    self.metrics.remove(slot);
+                }
+                self.run_query()
+            }
+            Message::TopNByPicked(choice) => {
+                self.top_n_by = choice.map(|c| c.pick);
                 self.run_query()
             }
             Message::SlicerMembersLoaded(dim_index, Ok(members)) => {
@@ -364,7 +413,8 @@ impl App {
                     schema,
                     &self.rows,
                     &self.columns,
-                    self.metric,
+                    &self.metrics,
+                    self.top_n_by,
                     &self.slicer,
                     &self.slicer_options,
                 ),
@@ -386,8 +436,14 @@ impl App {
         let Some(cube) = self.cube.clone() else {
             return Task::none();
         };
-        let Some(query) = build_query(schema, &self.rows, &self.columns, self.metric, &self.slicer)
-        else {
+        let Some(query) = build_query(
+            schema,
+            &self.rows,
+            &self.columns,
+            &self.metrics,
+            &self.slicer,
+            self.top_n_by,
+        ) else {
             self.result = QueryState::Idle;
             return Task::none();
         };
@@ -412,11 +468,13 @@ impl App {
 /// Build the left-hand sidebar of pickers. Every option is derived from
 /// the introspected [`Schema`] — there are no string literals referring to
 /// specific dims, levels, or metrics in this function.
+#[allow(clippy::too_many_arguments)]
 fn sidebar<'a>(
     schema: &'a Schema,
     rows: &AxisPick,
     columns: &AxisPick,
-    metric: Option<MetricPick>,
+    metrics: &[Option<MetricPick>],
+    top_n_by: Option<MetricPick>,
     slicer: &HashMap<usize, MemberRef>,
     slicer_options: &HashMap<usize, Vec<MemberRef>>,
 ) -> Element<'a, Message> {
@@ -452,8 +510,6 @@ fn sidebar<'a>(
 
     let rows_dim_selected = current_dim_choice(&dim_options, rows);
     let columns_dim_selected = current_dim_choice(&dim_options, columns);
-    let metric_selected =
-        metric.and_then(|pick| metric_options.iter().find(|c| c.pick == pick).cloned());
 
     let rows_block = axis_picker(
         "Rows",
@@ -475,23 +531,108 @@ fn sidebar<'a>(
         Message::ColumnsLevelPicked,
     );
 
-    let metric_block = column![
-        text("Metric").size(13),
-        pick_list(metric_selected, metric_options, |c: &MetricChoice| {
-            c.label.clone()
-        })
-        .on_select(|c: MetricChoice| Message::MetricPicked(Some(c)))
-        .placeholder("(pick a metric)")
-        .width(Length::Fill),
-    ]
-    .spacing(6);
+    let metric_block = metric_panel(metrics, &metric_options);
+    let top_n_block = top_n_panel(rows, top_n_by, &metric_options);
 
     let slicer_block = slicer_panel(schema, rows, columns, slicer, slicer_options);
 
-    column![rows_block, columns_block, metric_block, slicer_block]
-        .spacing(16)
-        .width(Length::Fixed(260.0))
-        .into()
+    column![
+        rows_block,
+        columns_block,
+        metric_block,
+        top_n_block,
+        slicer_block
+    ]
+    .spacing(16)
+    .width(Length::Fixed(260.0))
+    .into()
+}
+
+/// Build the stacked Metric pickers — one pick_list per slot, a "×" remove
+/// button beside each, and a "+ Add metric" button at the bottom.
+fn metric_panel<'a>(
+    metrics: &[Option<MetricPick>],
+    metric_options: &[MetricChoice],
+) -> Element<'a, Message> {
+    let mut children: Vec<Element<'a, Message>> = vec![text("Metric").size(13).into()];
+
+    for (slot, entry) in metrics.iter().enumerate() {
+        let selected =
+            entry.and_then(|pick| metric_options.iter().find(|c| c.pick == pick).cloned());
+        let options = metric_options.to_vec();
+        let picker = pick_list(selected, options, |c: &MetricChoice| c.label.clone())
+            .on_select(move |c: MetricChoice| Message::MetricSlotPicked {
+                slot,
+                pick: Some(c),
+            })
+            .placeholder("(pick a metric)")
+            .width(Length::Fill);
+        let remove = button(text("\u{00d7}").size(12)).on_press(Message::MetricSlotRemoved(slot));
+        children.push(
+            row![picker, remove]
+                .spacing(6)
+                .align_y(Alignment::Center)
+                .into(),
+        );
+    }
+
+    children.push(
+        button(text("+ Add metric").size(12))
+            .on_press(Message::MetricSlotAdded)
+            .into(),
+    );
+
+    Column::with_children(children).spacing(6).into()
+}
+
+/// Build the Top-N picker. Disabled when the rows axis is absent — Top-N
+/// ranks the rows tuples, so there's nothing to filter without a rows
+/// axis. N is hard-coded at 10 for v1; a number input is a later iteration.
+fn top_n_panel<'a>(
+    rows: &AxisPick,
+    top_n_by: Option<MetricPick>,
+    metric_options: &[MetricChoice],
+) -> Element<'a, Message> {
+    let heading = text("Top-N").size(13);
+    let rows_present = matches!(rows, AxisPick::Pick { .. });
+
+    if !rows_present {
+        return column![
+            heading,
+            text("(pick a rows axis first)")
+                .size(12)
+                .style(text::secondary),
+        ]
+        .spacing(6)
+        .into();
+    }
+
+    let options = metric_options.to_vec();
+    let selected =
+        top_n_by.and_then(|pick| metric_options.iter().find(|c| c.pick == pick).cloned());
+
+    let picker = pick_list(selected, options, |c: &MetricChoice| c.label.clone())
+        .on_select(|c: MetricChoice| Message::TopNByPicked(Some(c)))
+        .placeholder("(off)")
+        .width(Length::Fill);
+
+    // Clear-pin control — visible only when Top-N is on, so the common
+    // "off" case has one less widget on screen.
+    let clear: Element<'_, Message> = if top_n_by.is_some() {
+        button(text("Off").size(11))
+            .on_press(Message::TopNByPicked(None))
+            .into()
+    } else {
+        text("").into()
+    };
+
+    column![
+        heading,
+        text("Top 10 by\u{2026}").size(12).style(text::secondary),
+        row![picker, clear].spacing(6).align_y(Alignment::Center),
+    ]
+    .spacing(4)
+    .into()
 }
 
 /// Build the slicer shelf — one picker per dim *not* currently on rows or
@@ -757,11 +898,44 @@ fn build_query(
     schema: &Schema,
     rows: &AxisPick,
     columns: &AxisPick,
-    metric: Option<MetricPick>,
+    metrics: &[Option<MetricPick>],
     slicer: &HashMap<usize, MemberRef>,
+    top_n_by: Option<MetricPick>,
 ) -> Option<Query> {
-    let axes = build_axes(schema, rows, columns)?;
-    let metric = metric.and_then(|p| metric_name(schema, p))?;
+    // Any empty slot blocks the query — including the single seeded slot
+    // at boot, so the panel shows the Idle placeholder until the user
+    // picks something.
+    if metrics.is_empty() || metrics.iter().any(Option::is_none) {
+        return None;
+    }
+    let metric_names: Vec<Name> = metrics
+        .iter()
+        .flatten()
+        .map(|pick| metric_name(schema, *pick))
+        .collect::<Option<Vec<_>>>()?;
+
+    let mut axes = build_axes(schema, rows, columns)?;
+
+    // Wrap the rows axis in `Set::top` when the user has enabled Top-N
+    // and a rows axis exists. Scalar / Pages have no rows to top; the
+    // Top-N panel is disabled when rows is None, so this arm is
+    // defensive only. N is hard-coded at 10 for v1 — a number input is a
+    // later iteration.
+    if let Some(pick) = top_n_by {
+        let by_name = metric_name(schema, pick)?;
+        let n = NonZeroUsize::new(10).expect("10 is non-zero");
+        axes = match axes {
+            Axes::Series { rows } => Axes::Series {
+                rows: rows.top(n, by_name),
+            },
+            Axes::Pivot { rows, columns } => Axes::Pivot {
+                rows: rows.top(n, by_name),
+                columns,
+            },
+            other => other,
+        };
+    }
+
     // `Tuple::of` rejects duplicate-dim inputs; we never add two members
     // for the same dim (the key is the dim's index into `schema.dimensions`,
     // one entry per dim), so `.ok()` is sound here.
@@ -769,7 +943,7 @@ fn build_query(
     Some(Query {
         axes,
         slicer: slicer_tuple,
-        metrics: vec![metric],
+        metrics: metric_names,
         options: query::Options::default(),
     })
 }
