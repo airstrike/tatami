@@ -34,9 +34,12 @@ use tatami::{Axes, Cube, Query, Results};
 use tatami_inmem::InMemoryCube;
 
 mod facts;
+mod icon;
 mod schema;
 mod theme;
 mod widgets;
+
+use theme::{HEADING_SIZE, ICON_BUTTON_PADDING, ICON_SIZE, PICKER_PADDING, PICKER_SIZE, TEXT_SIZE};
 
 /// Primary UI typeface — Inter. Loaded from Google Fonts at startup via
 /// `fount`; until the network call resolves, iced falls back to its
@@ -53,6 +56,7 @@ fn main() -> iced::Result {
     iced::application(App::new, App::update, App::view)
         .theme(|_: &App| Theme::Light)
         .default_font(INTER)
+        .font(icon::FONT)
         .window_size((1200.0, 800.0))
         .title("Hewton — tatami v0.1 worked example")
         .run()
@@ -521,10 +525,10 @@ impl App {
 
     fn view(&self) -> Element<'_, Message> {
         if let Some(error) = &self.load_error {
-            return center(text(format!("Error: {error}")).size(14)).into();
+            return center(text(format!("Error: {error}")).size(TEXT_SIZE)).into();
         }
         let Some(schema) = self.schema_ref.as_ref() else {
-            return center(text("Loading hewton facts\u{2026}").size(14)).into();
+            return center(text("Loading hewton facts\u{2026}").size(TEXT_SIZE)).into();
         };
 
         scrollable(
@@ -543,8 +547,8 @@ impl App {
                 ),
                 widgets::result_panel(&self.result),
             ]
-            .spacing(24)
-            .padding(24),
+            .spacing(16)
+            .padding(16),
         )
         .into()
     }
@@ -690,18 +694,37 @@ fn sidebar<'a>(
         filter_block,
         slicer_block
     ]
-    .spacing(16)
-    .width(Length::Fixed(260.0))
+    .spacing(10)
+    .width(Length::Fixed(240.0))
     .into()
 }
 
-/// Build the stacked Metric pickers — one pick_list per slot, a "×" remove
-/// button beside each, and a "+ Add metric" button at the bottom.
+// ── Styling helpers ────────────────────────────────────────────────────────
+
+/// Section heading — small-caps, muted, one notch above body size. Used
+/// at the top of every sidebar section to separate pickers visually
+/// without adding chrome.
+fn heading<'a, M: 'a>(label: &str) -> Element<'a, M> {
+    text(label.to_uppercase())
+        .size(HEADING_SIZE)
+        .style(theme::muted)
+        .into()
+}
+
+/// Muted hint — the low-contrast one-liner that explains why a section
+/// is inert (filter off, no rows axis, slicer empty).
+fn hint<'a, M: 'a>(label: &'a str) -> Element<'a, M> {
+    text(label).size(TEXT_SIZE).style(theme::muted).into()
+}
+
+/// Build the stacked Metric pickers — one pick_list per slot, a remove
+/// icon button (lucide `x`) beside each, and an add icon button
+/// (lucide `plus`) at the bottom.
 fn metric_panel<'a>(
     metrics: &[Option<MetricPick>],
     metric_options: &[MetricChoice],
 ) -> Element<'a, Message> {
-    let mut children: Vec<Element<'a, Message>> = vec![text("Metric").size(13).into()];
+    let mut children: Vec<Element<'a, Message>> = vec![heading("Metric")];
 
     for (slot, entry) in metrics.iter().enumerate() {
         let selected =
@@ -713,23 +736,28 @@ fn metric_panel<'a>(
                 pick: Some(c),
             })
             .placeholder("(pick a metric)")
+            .text_size(PICKER_SIZE)
+            .padding(PICKER_PADDING)
             .width(Length::Fill);
-        let remove = button(text("\u{00d7}").size(12)).on_press(Message::MetricSlotRemoved(slot));
+        let remove = button(icon::close().size(ICON_SIZE))
+            .padding(ICON_BUTTON_PADDING)
+            .on_press(Message::MetricSlotRemoved(slot));
         children.push(
             row![picker, remove]
-                .spacing(6)
+                .spacing(4)
                 .align_y(Alignment::Center)
                 .into(),
         );
     }
 
     children.push(
-        button(text("+ Add metric").size(12))
+        button(icon::plus().size(ICON_SIZE))
+            .padding(ICON_BUTTON_PADDING)
             .on_press(Message::MetricSlotAdded)
             .into(),
     );
 
-    Column::with_children(children).spacing(6).into()
+    Column::with_children(children).spacing(4).into()
 }
 
 /// Build the Top-N picker. Disabled when the rows axis is absent — Top-N
@@ -740,18 +768,12 @@ fn top_n_panel<'a>(
     top_n_by: Option<MetricPick>,
     metric_options: &[MetricChoice],
 ) -> Element<'a, Message> {
-    let heading = text("Top-N").size(13);
     let rows_present = matches!(rows, AxisPick::Pick { .. });
 
     if !rows_present {
-        return column![
-            heading,
-            text("(pick a rows axis first)")
-                .size(12)
-                .style(text::secondary),
-        ]
-        .spacing(6)
-        .into();
+        return column![heading("Top-N"), hint("(pick a rows axis first)")]
+            .spacing(4)
+            .into();
     }
 
     let options = metric_options.to_vec();
@@ -761,12 +783,15 @@ fn top_n_panel<'a>(
     let picker = pick_list(selected, options, |c: &MetricChoice| c.label.clone())
         .on_select(|c: MetricChoice| Message::TopNByPicked(Some(c)))
         .placeholder("(off)")
+        .text_size(PICKER_SIZE)
+        .padding(PICKER_PADDING)
         .width(Length::Fill);
 
     // Clear-pin control — visible only when Top-N is on, so the common
     // "off" case has one less widget on screen.
     let clear: Element<'_, Message> = if top_n_by.is_some() {
-        button(text("Off").size(11))
+        button(icon::close().size(ICON_SIZE))
+            .padding(ICON_BUTTON_PADDING)
             .on_press(Message::TopNByPicked(None))
             .into()
     } else {
@@ -774,9 +799,9 @@ fn top_n_panel<'a>(
     };
 
     column![
-        heading,
-        text("Top 10 by\u{2026}").size(12).style(text::secondary),
-        row![picker, clear].spacing(6).align_y(Alignment::Center),
+        heading("Top-N"),
+        hint("Top 10 by\u{2026}"),
+        row![picker, clear].spacing(4).align_y(Alignment::Center),
     ]
     .spacing(4)
     .into()
@@ -793,8 +818,6 @@ fn filter_panel<'a>(
     filter_value_text: &str,
     metric_options: &[MetricChoice],
 ) -> Element<'a, Message> {
-    let heading = text("Filter").size(13);
-
     let kind_options = vec![
         FilterKindChoice::Off,
         FilterKindChoice::On(FilterKind::Eq),
@@ -814,16 +837,14 @@ fn filter_panel<'a>(
             FilterKindChoice::On(k) => Some(k),
         })
     })
+    .text_size(PICKER_SIZE)
+    .padding(PICKER_PADDING)
     .width(Length::Fill);
 
     if filter_kind.is_none() {
-        return column![
-            heading,
-            kind_picker,
-            text("(filter off)").size(12).style(text::secondary),
-        ]
-        .spacing(6)
-        .into();
+        return column![heading("Filter"), kind_picker, hint("(filter off)")]
+            .spacing(4)
+            .into();
     }
 
     let by_options = metric_options.to_vec();
@@ -832,10 +853,14 @@ fn filter_panel<'a>(
     let by_picker = pick_list(selected_by, by_options, |c: &MetricChoice| c.label.clone())
         .on_select(|c: MetricChoice| Message::FilterByPicked(Some(c)))
         .placeholder("(pick a metric)")
+        .text_size(PICKER_SIZE)
+        .padding(PICKER_PADDING)
         .width(Length::Fill);
 
     let value_input = text_input("(value)", filter_value_text)
         .on_input(Message::FilterValueChanged)
+        .size(PICKER_SIZE)
+        .padding(PICKER_PADDING)
         .width(Length::Fill);
 
     // Hint line when the three inputs aren't all valid yet — makes it
@@ -844,15 +869,18 @@ fn filter_panel<'a>(
     let status: Element<'_, Message> = if ready {
         text("").into()
     } else {
-        text("(pick metric + numeric value)")
-            .size(12)
-            .style(text::secondary)
-            .into()
+        hint("(pick metric + numeric value)")
     };
 
-    column![heading, kind_picker, by_picker, value_input, status]
-        .spacing(6)
-        .into()
+    column![
+        heading("Filter"),
+        kind_picker,
+        by_picker,
+        value_input,
+        status
+    ]
+    .spacing(4)
+    .into()
 }
 
 /// Build the slicer shelf — one picker per dim *not* currently on rows or
@@ -867,7 +895,7 @@ fn slicer_panel<'a>(
 ) -> Element<'a, Message> {
     let on_axis = axis_dim_set(rows, columns);
 
-    let mut children: Vec<Element<'a, Message>> = vec![text("Slicer").size(13).into()];
+    let mut children: Vec<Element<'a, Message>> = vec![heading("Slicer")];
     let mut shown_any = false;
     for (dim_index, dim) in schema.dimensions.iter().enumerate() {
         if on_axis.contains(&dim_index) {
@@ -878,14 +906,9 @@ fn slicer_panel<'a>(
         children.push(picker);
     }
     if !shown_any {
-        children.push(
-            text("(all dims on axes)")
-                .size(12)
-                .style(text::secondary)
-                .into(),
-        );
+        children.push(hint("(all dims on axes)"));
     }
-    Column::with_children(children).spacing(8).into()
+    Column::with_children(children).spacing(6).into()
 }
 
 fn slicer_picker<'a>(
@@ -895,18 +918,13 @@ fn slicer_picker<'a>(
     slicer_options: &HashMap<usize, Vec<MemberRef>>,
 ) -> Element<'a, Message> {
     let label = dim.name.as_str().to_owned();
-    let header = text(label).size(12);
+    let header: Element<'a, Message> = text(label).size(TEXT_SIZE).style(theme::muted).into();
 
     let Some(members) = slicer_options.get(&dim_index) else {
         // Cached data not ready yet — render a placeholder instead of the
         // picker. The `SchemaReady` handler fires one Task per dim, so
         // this resolves as soon as that future lands.
-        return column![
-            header,
-            text("(loading\u{2026})").size(12).style(text::secondary),
-        ]
-        .spacing(4)
-        .into();
+        return column![header, hint("(loading\u{2026})")].spacing(2).into();
     };
 
     let options: Vec<SlicerChoice> = members
@@ -924,12 +942,15 @@ fn slicer_picker<'a>(
     let picker = pick_list(selected, options, |c: &SlicerChoice| c.label.clone())
         .on_select(move |c: SlicerChoice| Message::SlicerPicked(dim_index, Some(c)))
         .placeholder("(unbound)")
+        .text_size(PICKER_SIZE)
+        .padding(PICKER_PADDING)
         .width(Length::Fill);
 
     // Clear-pin control — visible only when something is pinned so the
     // common case of "no pin" has one less widget on screen.
     let clear: Element<'a, Message> = if slicer.contains_key(&dim_index) {
-        button(text("Clear").size(11))
+        button(icon::close().size(ICON_SIZE))
+            .padding(ICON_BUTTON_PADDING)
             .on_press(Message::SlicerPicked(dim_index, None))
             .into()
     } else {
@@ -938,9 +959,9 @@ fn slicer_picker<'a>(
 
     column![
         header,
-        row![picker, clear].spacing(6).align_y(Alignment::Center),
+        row![picker, clear].spacing(4).align_y(Alignment::Center),
     ]
-    .spacing(4)
+    .spacing(2)
     .into()
 }
 
@@ -958,7 +979,7 @@ fn axis_dim_set(rows: &AxisPick, columns: &AxisPick) -> std::collections::HashSe
 
 #[allow(clippy::too_many_arguments)]
 fn axis_picker<'a>(
-    heading: &'static str,
+    label: &'static str,
     dim_options: Vec<DimChoice>,
     selected_dim: Option<DimChoice>,
     schema: &'a Schema,
@@ -969,6 +990,8 @@ fn axis_picker<'a>(
     let dim_list = pick_list(selected_dim, dim_options, |c: &DimChoice| c.label.clone())
         .on_select(move |c: DimChoice| on_dim(Some(c)))
         .placeholder("(none)")
+        .text_size(PICKER_SIZE)
+        .padding(PICKER_PADDING)
         .width(Length::Fill);
 
     // Level picker is populated only when a dim is chosen. The option
@@ -1006,19 +1029,17 @@ fn axis_picker<'a>(
             pick_list(selected, options, |c: &LevelChoice| c.label.clone())
                 .on_select(move |c: LevelChoice| on_level(Some(c)))
                 .placeholder("(level)")
+                .text_size(PICKER_SIZE)
+                .padding(PICKER_PADDING)
                 .width(Length::Fill)
                 .into()
         }
         AxisPick::None => text("").into(),
     };
 
-    column![
-        text(heading).size(13),
-        row![dim_list].align_y(Alignment::Center),
-        level_element,
-    ]
-    .spacing(6)
-    .into()
+    column![heading(label), dim_list, level_element]
+        .spacing(4)
+        .into()
 }
 
 fn current_dim_choice(options: &[DimChoice], pick: &AxisPick) -> Option<DimChoice> {

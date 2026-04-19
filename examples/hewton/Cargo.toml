@@ -31,3 +31,10 @@ fount = { git = "https://github.com/airstrike/fount.git" }
 # uses sweeten::widget::table (closure takes &Row, optional headers,
 # sticky-header support) over iced's native table.
 sweeten = { git = "https://github.com/airstrike/sweeten", branch = "dev" }
+
+# airstrike/iced_lucide — compile-time Lucide icon font codegen. Reads
+# `fonts/icons.toml`, emits a `src/icon.rs`-equivalent module in OUT_DIR
+# with one `pub fn <name>() -> iced::widget::Text` per requested glyph.
+# Build-only: the generated module is plain iced, no runtime dep needed.
+[build-dependencies]
+iced_lucide = { git = "https://github.com/airstrike/iced_lucide.git" }

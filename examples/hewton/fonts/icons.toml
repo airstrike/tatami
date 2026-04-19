@@ -1,0 +1,10 @@
+module = "icon"
+
+# Icons in use by the Hewton composer sidebar. Growing the set is a
+# two-line change: add an entry below, then call `icon::<name>()` at the
+# view site. The `build.rs` re-runs automatically on every save to this
+# file.
+
+[icons]
+plus  = "plus"
+close = "x"
