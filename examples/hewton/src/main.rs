@@ -17,15 +17,19 @@
 //! ## North star
 //!
 //! TEA (Elm architecture) via `iced::application(new, update, view)`.
-//! Queries flow as `Message` values; `update` dispatches them to
-//! `Arc<InMemoryCube>`; view is a pure function of `Results`.
+//! Facts load asynchronously from `assets/hewton.csv`; once the CSV parse
+//! completes, the cube is constructed and every `ExampleQuery` fires
+//! as its own `Task`. Each result lands in a `HashMap` keyed by the
+//! enum, and `view` is a pure function of that state.
 
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use iced::widget::{column, scrollable};
+use iced::widget::{center, column, scrollable, text};
 use iced::{Element, Font, Task, Theme, font};
 
+use polars_core::prelude::DataFrame;
+use tatami::schema::Schema;
 use tatami::{Cube, Results};
 use tatami_inmem::InMemoryCube;
 
@@ -58,15 +62,14 @@ fn main() -> iced::Result {
 
 // ── Model ──────────────────────────────────────────────────────────────────
 
-/// Application state. Cube is shared via `Arc` so each query task gets a
-/// cheap handle; results land in an `ExampleQuery`-keyed map as they
-/// complete — the enum is both the identity and the UI metadata source.
+/// Application state. The schema is built synchronously at startup; the
+/// cube arrives asynchronously once `assets/hewton.csv` parses. Results
+/// land in the `ExampleQuery`-keyed map as each query finishes.
 struct App {
-    // Retained so the cube lives as long as the app; Phase 5 will re-issue
-    // queries on interaction and this field becomes read-every-frame.
-    #[allow(dead_code)]
-    cube: Arc<InMemoryCube>,
+    schema: Schema,
+    cube: Option<Arc<InMemoryCube>>,
     results: HashMap<ExampleQuery, QueryState>,
+    load_error: Option<String>,
 }
 
 enum QueryState {
@@ -79,12 +82,11 @@ enum QueryState {
 
 #[derive(Debug, Clone)]
 enum Message {
-    /// A named query completed — success or failure.
+    /// `assets/hewton.csv` parsed — cube can now be constructed.
+    FactsLoaded(Result<DataFrame, String>),
+    /// A named query completed.
     QueryDone(ExampleQuery, Result<Results, String>),
     /// A Google Fonts family finished downloading + registering with iced.
-    /// The second payload is `Err(reason)` on download/parse failure; iced
-    /// falls back to the platform default silently, so this is logged but
-    /// not surfaced to the view.
     FontLoaded(&'static str, Result<(), String>),
 }
 
@@ -92,62 +94,79 @@ enum Message {
 
 impl App {
     fn new() -> (Self, Task<Message>) {
-        // Build the schema using the tidy-style fluent API — the single
-        // non-compile-error path from Name::parse to a validated Schema.
         let schema = schema::hewton_schema().expect("hewton schema is valid");
 
-        // Build the in-memory fact source (Polars DataFrame).
-        let facts = facts::hewton_facts();
+        // Fire the initial async tasks: the CSV load and the font load.
+        // Query tasks only launch once FactsLoaded arrives in update.
+        let init = Task::batch([
+            load_family("Inter"),
+            Task::future(facts::load()).map(Message::FactsLoaded),
+        ]);
 
-        // Wrap into a Cube. InMemoryCube validates measure/dim column
-        // existence at construction; after this point every query is
-        // against a known-good cube.
-        let cube = Arc::new(InMemoryCube::new(facts, schema).expect("fact source matches schema"));
+        let app = Self {
+            schema,
+            cube: None,
+            results: HashMap::new(),
+            load_error: None,
+        };
 
-        // Kick off each example query concurrently. Each returns a Task
-        // that resolves to a `QueryDone` message keyed by `ExampleQuery`.
-        let mut results = HashMap::with_capacity(ExampleQuery::ALL.len());
-        let query_tasks: Vec<Task<Message>> = ExampleQuery::ALL
-            .into_iter()
-            .map(|eq| {
-                results.insert(eq, QueryState::Running);
-                spawn(cube.clone(), eq)
-            })
-            .collect();
-
-        // Load Inter from Google Fonts. Until it resolves, text renders in
-        // the platform default. No blocking on this — font arrival triggers
-        // a natural re-layout.
-        let init = Task::batch(
-            std::iter::once(load_family("Inter"))
-                .chain(query_tasks)
-                .collect::<Vec<_>>(),
-        );
-
-        (Self { cube, results }, init)
+        (app, init)
     }
 
     fn update(&mut self, message: Message) -> Task<Message> {
         match message {
+            Message::FactsLoaded(Ok(df)) => {
+                // Build the cube. InMemoryCube validates every measure/level
+                // column at construction; after this point every query is
+                // against a known-good cube.
+                match InMemoryCube::new(df, self.schema.clone()) {
+                    Ok(cube) => {
+                        let cube = Arc::new(cube);
+                        let tasks: Vec<Task<Message>> = ExampleQuery::ALL
+                            .into_iter()
+                            .map(|eq| {
+                                self.results.insert(eq, QueryState::Running);
+                                spawn(cube.clone(), eq)
+                            })
+                            .collect();
+                        self.cube = Some(cube);
+                        Task::batch(tasks)
+                    }
+                    Err(error) => {
+                        self.load_error = Some(format!("cube construction: {error}"));
+                        Task::none()
+                    }
+                }
+            }
+            Message::FactsLoaded(Err(error)) => {
+                self.load_error = Some(format!("facts load: {error}"));
+                Task::none()
+            }
             Message::QueryDone(eq, Ok(results)) => {
                 self.results.insert(eq, QueryState::Ok(results));
+                Task::none()
             }
             Message::QueryDone(eq, Err(error)) => {
                 self.results.insert(eq, QueryState::Err(error));
+                Task::none()
             }
-            Message::FontLoaded(_name, Ok(())) => {
-                // iced re-lays out on next frame; nothing to do here.
-            }
+            Message::FontLoaded(_name, Ok(())) => Task::none(),
             Message::FontLoaded(name, Err(error)) => {
-                // Silent fall-through to the platform default is fine —
-                // log for local debugging and keep going.
                 eprintln!("font load failed: {name} — {error}");
+                Task::none()
             }
         }
-        Task::none()
     }
 
     fn view(&self) -> Element<'_, Message> {
+        // Loading / error splash until the cube is ready.
+        if let Some(error) = &self.load_error {
+            return center(text(format!("Error: {error}")).size(14)).into();
+        }
+        if self.cube.is_none() {
+            return center(text("Loading hewton facts\u{2026}").size(14)).into();
+        }
+
         let cards = ExampleQuery::ALL
             .into_iter()
             .map(|eq| widgets::card(eq.heading(), eq.subtitle(), self.results.get(&eq)));
@@ -166,10 +185,6 @@ impl App {
 
 /// Fire one example query as an iced `Task`. The returned `Task` resolves
 /// to `Message::QueryDone(eq, Ok/Err)` when `cube.query(&q)` finishes.
-///
-/// This is the entire "how does the app talk to tatami" story: query is
-/// `async fn`, we wrap it in `Task::future`, we map the result into a
-/// Message. Nothing else.
 fn spawn(cube: Arc<InMemoryCube>, eq: ExampleQuery) -> Task<Message> {
     let query = eq.query();
     Task::future(async move {
