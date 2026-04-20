@@ -18,7 +18,7 @@ jiff      = { workspace = true }
 serde_json = { workspace = true }
 
 [workspace]
-members  = ["tatami-inmem", "examples/*"]
+members  = ["inmem", "examples/*"]
 resolver = "3"
 
 [workspace.package]
@@ -39,7 +39,7 @@ bare_urls               = "warn"
 # Intra-workspace crates — every member that consumes another tatami crate
 # goes through these, not path-relative specs.
 tatami       = { path = "." }
-tatami-inmem = { path = "tatami-inmem" }
+tatami-inmem = { path = "inmem" }
 
 # Baseline per MAP §9 — additions to this list need a justification comment.
 serde      = { version = "1",    features = ["derive"] }
