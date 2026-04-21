@@ -158,17 +158,12 @@ The canonical internal pipeline is `Query → ResolvedQuery → Results`
    ref-existence `Result`s appear.** Evaluation sees only
    `ResolvedQuery` and cannot fail for those reasons.
 2. **Evaluate.** Walk `ResolvedAxes` → concrete tuples, walk `Expr` →
-   cells, assemble the `Results` shape per the `Axes` variant
-   (§3.3 of the MAP has the mapping table — Scalar / Series / Pivot /
-   Rollup).
+   cells, assemble the `Results` shape per the `Axes` variant (Scalar,
+   Series, Pivot, or Rollup).
 
-**Correctness target: observational equivalence with `tatami-inmem`**.
-Copy `tatami-inmem/tests/laws.rs` into your backend's `tests/`
-directory and run it against your `Cube` impl; every law should pass.
-Diverging behaviour means either the law is wrong (update MAP §3.7) or
-the implementation is (fix the backend). Phase 5i of the v0.1 MAP
-caught one (`PeriodsToDate` idempotence under sum semantics) and
-tightened another (`Lag` of `Const` in the in-range case).
+**Correctness target: observational equivalence with `tatami-inmem`.**
+Copy `tatami-inmem/tests/laws.rs` into your backend's `tests/` and
+run it; every law should pass.
 
 ## Prior art
 
@@ -189,5 +184,4 @@ The design is an idiomatic Rust translation of ideas from:
 
 ## License
 
-`tatami` is dual-licensed under [MIT](LICENSE-MIT) or
-[Apache-2.0](LICENSE-APACHE), at your option.
+[MIT](LICENSE).
