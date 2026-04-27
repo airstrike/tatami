@@ -1431,7 +1431,7 @@ checksum = "fc0fef456e4baa96da950455cd02c081ca953b141298e41db3fc7e36b1da849c"
 
 [[package]]
 name = "hewton"
-version = "0.1.0"
+version = "0.2.0-dev"
 dependencies = [
  "fount",
  "iced",
@@ -4215,7 +4215,7 @@ dependencies = [
 
 [[package]]
 name = "tatami"
-version = "0.1.0"
+version = "0.2.0-dev"
 dependencies = [
  "jiff",
  "serde",
@@ -4225,7 +4225,7 @@ dependencies = [
 
 [[package]]
 name = "tatami-inmem"
-version = "0.1.0"
+version = "0.2.0-dev"
 dependencies = [
  "polars-core",
  "proptest",
