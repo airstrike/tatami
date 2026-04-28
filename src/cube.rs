@@ -12,10 +12,15 @@
 //! Plus the [`MemberRelation`] enum — the navigation verb fed to
 //! [`Cube::members`].
 //!
-//! The trait uses native `async fn` (Rust 2024). Calls return
-//! `std::result::Result<_, Self::Error>` — we qualify `std::result::Result`
-//! because the crate re-exports [`Results`] at the root, so the
-//! unqualified name `Result` would collide.
+//! The three methods declare their returns as `impl Future + Send` so
+//! consumers can `.await` cube methods inside `Send + 'static` futures
+//! (e.g. HTTP handlers registered on `runway::Router`). Impls keep
+//! `async fn` syntax — the desugared future is `Send` as long as
+//! captures are `Send`, which holds for every realistic backend
+//! (Polars, reqwest, tokio). Calls return `std::result::Result<_,
+//! Self::Error>` — we qualify `std::result::Result` because the crate
+//! re-exports [`Results`] at the root, so the unqualified name `Result`
+//! would collide.
 
 use crate::schema::{Name, Schema};
 use crate::{MemberRef, Query, Results};
@@ -25,16 +30,6 @@ use crate::{MemberRef, Query, Results};
 ///
 /// See MAP §3.4 for the three-method contract and §3.3 for the
 /// `Axes → Results` mapping [`Cube::query`] must respect.
-///
-/// # `async fn` in traits
-///
-/// MAP §3.4 specifies native `async fn` (Rust 2024) for the three methods.
-/// Rust warns on this because the returned future's auto traits can't be
-/// named at the trait; we silence the warning at the trait level because
-/// the design intentionally trades that naming for the terser signatures.
-/// Callers that need `Send` futures can bound `impl Future<..> + Send`
-/// themselves where they hold a concrete backend.
-#[allow(async_fn_in_trait)]
 pub trait Cube: Send + Sync {
     /// Per-backend error type. Bound so callers can propagate it through
     /// `Box<dyn std::error::Error>` or `anyhow::Error`.
@@ -44,7 +39,9 @@ pub trait Cube: Send + Sync {
     ///
     /// Backends typically return a clone of a `Schema` validated at
     /// construction time. See MAP §3.1 for the schema types.
-    async fn schema(&self) -> std::result::Result<Schema, Self::Error>;
+    fn schema(
+        &self,
+    ) -> impl std::future::Future<Output = std::result::Result<Schema, Self::Error>> + Send;
 
     /// Evaluate an axis-projection query.
     ///
@@ -52,20 +49,23 @@ pub trait Cube: Send + Sync {
     /// of `q` per the total mapping in MAP §3.3. Backends internally call
     /// the `resolve(query, schema)` step (§3.6) to lift the public
     /// [`Query`] into the crate-internal `ResolvedQuery` before evaluation.
-    async fn query(&self, q: &Query) -> std::result::Result<Results, Self::Error>;
+    fn query(
+        &self,
+        q: &Query,
+    ) -> impl std::future::Future<Output = std::result::Result<Results, Self::Error>> + Send;
 
     /// Hierarchy navigation — answer "what are the `relation` of `at` in
     /// `(dim, hierarchy)`?".
     ///
     /// Used by drill-down controls and by interactive UI that doesn't want
     /// to construct a full [`Query`] just to list a member's children.
-    async fn members(
+    fn members(
         &self,
         dim: &Name,
         hierarchy: &Name,
         at: &MemberRef,
         relation: MemberRelation,
-    ) -> std::result::Result<Vec<MemberRef>, Self::Error>;
+    ) -> impl std::future::Future<Output = std::result::Result<Vec<MemberRef>, Self::Error>> + Send;
 }
 
 /// The navigation verb passed to [`Cube::members`]. See MAP §3.4.
