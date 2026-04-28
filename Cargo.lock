@@ -2916,6 +2916,25 @@ dependencies = [
 ]
 
 [[package]]
+name = "meridianre-board"
+version = "0.2.0-dev"
+dependencies = [
+ "anyhow",
+ "fount",
+ "iced",
+ "meridianre-serve",
+ "runway",
+ "sweeten",
+ "tatami",
+ "tatami-http",
+ "tatami-inmem",
+ "tatami-serve",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
+]
+
+[[package]]
 name = "meridianre-serve"
 version = "0.2.0-dev"
 dependencies = [

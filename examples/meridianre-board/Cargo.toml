@@ -1,0 +1,41 @@
+[package]
+name        = "meridianre-board"
+description = "Iced GUI demo: drill-down dashboard over a meridianre cube via tatami-http."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish     = false
+
+[lints]
+workspace = true
+
+# Mirrors hewton's stack — iced 0.15-dev fork from airstrike, sweeten dev
+# branch for the table widget. We skip the icon-font codegen layer; the
+# board uses plain Inter for everything.
+[dependencies]
+tatami       = { workspace = true }
+tatami-inmem = { workspace = true }
+tatami-serve = { workspace = true }
+tatami-http  = { workspace = true }
+runway       = { workspace = true }
+
+# Sibling example exposes its cube builder as a library so the demo
+# doesn't re-derive the meridianre schema. Path dep — `meridianre-serve`
+# isn't published.
+meridianre-serve = { path = "../meridianre-serve" }
+
+iced  = { workspace = true }
+tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
+
+# airstrike/sweeten — same dev-branch git dep hewton uses for the table
+# widget. We render scalar/series/pivot/rollup with sweeten's table for
+# tabular shapes and plain iced widgets for KPI/series fall-throughs.
+sweeten = { git = "https://github.com/airstrike/sweeten", branch = "dev" }
+
+# airstrike/fount — Google Fonts loader, also for parity with hewton.
+fount = { git = "https://github.com/airstrike/fount.git" }
+
+# Binary-level error handling per RUST_STYLE.md.
+anyhow             = "1"
+tracing            = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
