@@ -13,25 +13,6 @@
 //! for the design rationale. The crate intentionally does not derive
 //! `JsonSchema` on tatami types; OpenAPI generation is a downstream
 //! concern that lands later, alongside the facade split.
-//!
-//! # Concurrency model
-//!
-//! Each [`Service`] owns a dedicated worker OS thread running a
-//! current-thread `tokio` runtime. Inbound requests cross from the
-//! runway server's threadpool into the worker via a `tokio::sync::mpsc`
-//! channel; the worker calls the cube's async methods inline, then
-//! returns each result via a `tokio::sync::oneshot`.
-//!
-//! This indirection exists because [`tatami::Cube`] uses native
-//! `async fn` (Rust 2024) without `Send` bounds on the returned
-//! futures. `runway::Router` requires handler futures to be `Send +
-//! 'static` — a generic call to `cube.schema().await` inside a routed
-//! closure cannot satisfy that without Return-Type-Notation, which is
-//! still unstable on Rust 1.95. Confining the cube to a single thread
-//! sidesteps the missing bound entirely; channels are `Send` regardless
-//! of the cube's future shape. When the trait gains Send-bound futures
-//! (or RTN stabilises), the worker thread becomes a no-op and can be
-//! removed without an API change.
 
 #![warn(missing_docs)]
 
@@ -39,87 +20,54 @@ mod error;
 mod handler;
 
 use std::sync::Arc;
-use std::thread;
-
-use tokio::runtime;
-use tokio::sync;
 
 pub use error::Error;
-
-use handler::{Handle, Request};
-
-/// Channel depth for the cube-worker mailbox. Picked to absorb a small
-/// burst of concurrent requests without blocking the runway threadpool;
-/// callers experiencing back-pressure should scale by running multiple
-/// services rather than tuning this.
-const WORKER_MAILBOX: usize = 128;
 
 /// HTTP-side wrapper for a [`tatami::Cube`].
 ///
 /// Construct with [`Service::new`] and register against a
-/// [`runway::Router`] via the [`runway::Module`] impl. The cube lives on
-/// a dedicated worker thread; the [`Service`] value is a cheaply cloneable
-/// channel handle into that worker.
+/// [`runway::Router`] via the [`runway::Module`] impl. The cube lives
+/// behind an `Arc` so route handlers clone and share it cheaply across
+/// concurrent requests; runway's threadpool dispatches them in parallel.
 pub struct Service<C> {
-    handle: Handle,
-    /// Drives the generic parameter without storing the cube directly —
-    /// the cube has been moved to the worker thread.
-    _phantom: std::marker::PhantomData<fn() -> C>,
+    cube: Arc<C>,
 }
 
 impl<C> Service<C>
 where
     C: tatami::Cube + Send + Sync + 'static,
 {
-    /// Spawn a worker thread that owns `cube` and return a handle to it.
-    ///
-    /// The worker runs a current-thread `tokio` runtime and processes
-    /// requests serially. Tearing down the [`Service`] (and any clones
-    /// of its handle) closes the request channel, which lets the worker
-    /// exit cleanly on the next loop iteration.
+    /// Wrap a cube as a runway-compatible HTTP service.
     pub fn new(cube: Arc<C>) -> Self {
-        let (tx, rx) = sync::mpsc::channel::<Request>(WORKER_MAILBOX);
-        thread::Builder::new()
-            .name("tatami-serve-cube".into())
-            .spawn(move || {
-                let rt = runtime::Builder::new_current_thread()
-                    .enable_all()
-                    .build()
-                    .expect("current-thread runtime builds");
-                rt.block_on(handler::run_worker(cube, rx));
-            })
-            .expect("OS allocates the worker thread");
-        Self {
-            handle: Handle::new(tx),
-            _phantom: std::marker::PhantomData,
-        }
+        Self { cube }
     }
 }
 
 impl<C> runway::Module for Service<C>
 where
     C: tatami::Cube + Send + Sync + 'static,
+    C::Error: std::error::Error + Send + Sync + 'static,
 {
     fn name(&self) -> &'static str {
         "cube"
     }
 
     fn routes(&self, router: &mut runway::Router) {
-        let schema_handle = self.handle.clone();
-        let query_handle = self.handle.clone();
-        let members_handle = self.handle.clone();
+        let schema_cube = self.cube.clone();
+        let query_cube = self.cube.clone();
+        let members_cube = self.cube.clone();
 
         router.get("/api/v1/cube/schema", move |_ctx| {
-            let h = schema_handle.clone();
-            async move { handler::schema(h).await }
+            let cube = schema_cube.clone();
+            async move { handler::schema(cube).await }
         });
         router.post("/api/v1/cube/query", move |ctx| {
-            let h = query_handle.clone();
-            async move { handler::query(h, ctx).await }
+            let cube = query_cube.clone();
+            async move { handler::query(cube, ctx).await }
         });
         router.post("/api/v1/cube/members", move |ctx| {
-            let h = members_handle.clone();
-            async move { handler::members(h, ctx).await }
+            let cube = members_cube.clone();
+            async move { handler::members(cube, ctx).await }
         });
     }
 }

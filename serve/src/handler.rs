@@ -1,140 +1,58 @@
-//! Handler implementations for the three cube endpoints, plus the worker
-//! task that owns the cube on a dedicated thread.
+//! Handler implementations for the three cube endpoints.
 //!
-//! See the crate-level docs for the rationale behind the worker thread.
-//! In short: `tatami::Cube`'s async-fn-in-trait return types are not
-//! statically `Send`-bound, so we cannot await them from inside the
-//! `Send + 'static` futures `runway::Router` requires. Confining the cube
-//! to one thread and ferrying requests through `Send` channels is the
-//! stable-Rust workaround.
+//! Each handler clones the cube `Arc` (cheap), parses the request body
+//! (if any), calls the cube method directly, and serialises the response.
+//! The cube's async methods return `Send` futures (per the trait), so the
+//! routed closures satisfy `runway::Router`'s `Send + 'static` bound
+//! without any per-request thread or channel.
 
 use std::sync::Arc;
 
 use runway::Context;
 use serde::Deserialize;
-use tokio::sync;
 
 use crate::Error;
 
-/// Cheap, clonable handle to the cube worker. Each handler clones the
-/// handle, sends a request, and awaits the worker's reply.
-#[derive(Clone)]
-pub(crate) struct Handle {
-    tx: sync::mpsc::Sender<Request>,
-}
-
-impl Handle {
-    pub(crate) fn new(tx: sync::mpsc::Sender<Request>) -> Self {
-        Self { tx }
-    }
-
-    /// Send a request to the worker and await its reply, mapping every
-    /// failure mode (worker gone, channel closed, cube error) into a
-    /// `runway::Error`.
-    async fn call<T>(
-        &self,
-        build: impl FnOnce(sync::oneshot::Sender<Result<T, String>>) -> Request,
-    ) -> runway::Result<T> {
-        let (reply_tx, reply_rx) = sync::oneshot::channel();
-        self.tx
-            .send(build(reply_tx))
-            .await
-            .map_err(|_| Error::Cube("cube worker stopped".into()))?;
-        let result = reply_rx
-            .await
-            .map_err(|_| Error::Cube("cube worker dropped reply".into()))?;
-        result.map_err(|msg| Error::Cube(msg).into())
-    }
-}
-
-/// Messages sent from request handlers to the cube worker.
-///
-/// Each variant carries a `oneshot::Sender` that the worker uses to ship
-/// the result back to the awaiting handler. Errors from the cube are
-/// stringified before transit because `tatami::Cube::Error` is an
-/// associated type the worker side doesn't know how to forward typed.
-pub(crate) enum Request {
-    /// Resolve [`tatami::Cube::schema`].
-    Schema(sync::oneshot::Sender<Result<tatami::Schema, String>>),
-    /// Resolve [`tatami::Cube::query`] for `query`.
-    Query(
-        tatami::Query,
-        sync::oneshot::Sender<Result<tatami::Results, String>>,
-    ),
-    /// Resolve [`tatami::Cube::members`] for `(dim, hierarchy, at, relation)`.
-    Members(
-        MembersArgs,
-        sync::oneshot::Sender<Result<Vec<tatami::MemberRef>, String>>,
-    ),
-}
-
-/// Members navigation arguments, bundled so [`Request::Members`] stays a
-/// single-payload variant rather than five positional fields.
-pub(crate) struct MembersArgs {
-    pub(crate) dim: tatami::schema::Name,
-    pub(crate) hierarchy: tatami::schema::Name,
-    pub(crate) at: tatami::MemberRef,
-    pub(crate) relation: tatami::MemberRelation,
-}
-
-/// Worker loop. Owns the cube, services requests one at a time, exits
-/// cleanly when every handle has been dropped.
-pub(crate) async fn run_worker<C>(cube: Arc<C>, mut rx: sync::mpsc::Receiver<Request>)
+/// `GET /api/v1/cube/schema` — return the cube's [`tatami::Schema`].
+pub(crate) async fn schema<C>(cube: Arc<C>) -> runway::Result<runway::response::HttpResponse>
 where
     C: tatami::Cube + Send + Sync + 'static,
+    C::Error: std::error::Error + Send + Sync + 'static,
 {
-    while let Some(req) = rx.recv().await {
-        match req {
-            Request::Schema(reply) => {
-                let r = cube.schema().await.map_err(|e| e.to_string());
-                let _ = reply.send(r);
-            }
-            Request::Query(q, reply) => {
-                let r = cube.query(&q).await.map_err(|e| e.to_string());
-                let _ = reply.send(r);
-            }
-            Request::Members(args, reply) => {
-                let r = cube
-                    .members(&args.dim, &args.hierarchy, &args.at, args.relation)
-                    .await
-                    .map_err(|e| e.to_string());
-                let _ = reply.send(r);
-            }
-        }
-    }
-}
-
-/// `GET /api/v1/cube/schema` — return the cube's [`tatami::Schema`].
-pub(crate) async fn schema(handle: Handle) -> runway::Result<runway::response::HttpResponse> {
-    let schema = handle.call(Request::Schema).await?;
+    let schema = cube.schema().await.map_err(map_cube_err)?;
     runway::response::ok(&schema)
 }
 
 /// `POST /api/v1/cube/query` — body is a [`tatami::Query`] JSON; returns
 /// the [`tatami::Results`] variant determined by the query's `Axes`.
-pub(crate) async fn query(
-    handle: Handle,
+pub(crate) async fn query<C>(
+    cube: Arc<C>,
     ctx: Context,
-) -> runway::Result<runway::response::HttpResponse> {
+) -> runway::Result<runway::response::HttpResponse>
+where
+    C: tatami::Cube + Send + Sync + 'static,
+    C::Error: std::error::Error + Send + Sync + 'static,
+{
     let q: tatami::Query = ctx.json().map_err(into_bad_body)?;
-    let results = handle.call(|reply| Request::Query(q, reply)).await?;
+    let results = cube.query(&q).await.map_err(map_cube_err)?;
     runway::response::ok(&results)
 }
 
 /// `POST /api/v1/cube/members` — request is a [`MembersRequest`]; returns
 /// `Vec<tatami::MemberRef>` resolved by the cube's hierarchy walk.
-pub(crate) async fn members(
-    handle: Handle,
+pub(crate) async fn members<C>(
+    cube: Arc<C>,
     ctx: Context,
-) -> runway::Result<runway::response::HttpResponse> {
+) -> runway::Result<runway::response::HttpResponse>
+where
+    C: tatami::Cube + Send + Sync + 'static,
+    C::Error: std::error::Error + Send + Sync + 'static,
+{
     let req: MembersRequest = ctx.json().map_err(into_bad_body)?;
-    let args = MembersArgs {
-        dim: req.dim,
-        hierarchy: req.hierarchy,
-        at: req.at,
-        relation: req.relation.into(),
-    };
-    let members = handle.call(|reply| Request::Members(args, reply)).await?;
+    let members = cube
+        .members(&req.dim, &req.hierarchy, &req.at, req.relation.into())
+        .await
+        .map_err(map_cube_err)?;
     runway::response::ok(&members)
 }
 
@@ -190,11 +108,18 @@ impl From<Relation> for tatami::MemberRelation {
     }
 }
 
-/// Map a runway-level body parse error into our `Error::BadBody` (400). This
-/// preserves the original message but reroutes it through `tatami_serve::Error`
-/// so the wire-side mapping stays in one place.
+/// Map a `runway::Error` (typically a body-parse failure) into our
+/// `Error::BadBody` (400). Funnels every wire-side parse error through
+/// `tatami_serve::Error` so the HTTP mapping stays in one place.
 fn into_bad_body(e: runway::Error) -> runway::Error {
     Error::BadBody(e.to_string()).into()
+}
+
+/// Convert a typed cube error into a `runway::Error` (500). Stringifies
+/// the message because `tatami::Cube::Error` is an associated type the
+/// HTTP layer cannot forward typed.
+fn map_cube_err<E: std::error::Error + 'static>(e: E) -> runway::Error {
+    Error::Cube(e.to_string()).into()
 }
 
 #[cfg(test)]
@@ -254,11 +179,10 @@ mod tests {
         assert!(matches!(mapped, tatami::MemberRelation::Descendants(3)));
     }
 
-    /// End-to-end exercise of the worker-thread plumbing: spin up a worker
-    /// over a stub cube whose `schema()` always errors, send a request via
-    /// the handle, verify the failure surfaces as a 500.
+    /// End-to-end exercise: invoke the schema handler against a stub cube
+    /// whose `schema()` always errors, verify the failure surfaces as a 500.
     #[tokio::test]
-    async fn cube_error_surfaces_as_500_through_worker() {
+    async fn cube_error_surfaces_as_500() {
         use std::fmt;
 
         struct ExplodingCube;
@@ -289,17 +213,10 @@ mod tests {
             }
         }
 
-        // Spawn a worker locally on this test's runtime.
-        let (tx, rx) = sync::mpsc::channel::<Request>(8);
-        let handle = Handle::new(tx);
         let cube = Arc::new(ExplodingCube);
-        tokio::spawn(async move {
-            run_worker(cube, rx).await;
-        });
-
-        // `runway::response::HttpResponse` does not derive Debug, so we
-        // cannot use `expect_err` directly — match the variant by hand.
-        let err = match schema(handle).await {
+        // `runway::HttpResponse` does not derive Debug, so we cannot use
+        // `expect_err` directly — match the variant by hand.
+        let err = match schema(cube).await {
             Ok(_) => panic!("cube error must surface, got Ok response"),
             Err(e) => e,
         };
