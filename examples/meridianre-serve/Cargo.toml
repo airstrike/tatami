@@ -1,0 +1,29 @@
+[package]
+name        = "meridianre-serve"
+description = "Local dev binary: meridianre InMemoryCube exposed via tatami-serve."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish     = false
+
+[lints]
+workspace = true
+
+[dependencies]
+tatami       = { workspace = true }
+tatami-inmem = { workspace = true }
+tatami-serve = { workspace = true }
+runway       = { workspace = true }
+polars-core  = { workspace = true }
+tokio        = { workspace = true, features = ["macros", "rt-multi-thread", "signal"] }
+tracing      = "0.1"
+
+# Direct deps. Mirrors hewton's pattern of pinning polars-io alongside the
+# workspace polars-core 0.51 pin — the core crate doesn't ship the CSV
+# reader, so the example carries it. Anyhow / clap / tracing-subscriber are
+# the binary-only ergonomics layer (per RUST_STYLE.md "anyhow at the binary
+# level").
+polars-io          = { version = "0.51", default-features = false, features = ["csv"] }
+anyhow             = "1"
+clap               = { version = "4", features = ["derive", "env"] }
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
