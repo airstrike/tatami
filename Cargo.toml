@@ -18,7 +18,7 @@ jiff      = { workspace = true }
 serde_json = { workspace = true }
 
 [workspace]
-members  = ["inmem", "serve", "examples/*"]
+members  = ["inmem", "serve", "http", "examples/*"]
 resolver = "3"
 
 [workspace.package]
@@ -41,6 +41,7 @@ bare_urls               = "warn"
 tatami       = { path = "." }
 tatami-inmem = { path = "inmem" }
 tatami-serve = { path = "serve" }
+tatami-http  = { path = "http" }
 
 # runway is the HTTP module surface tatami-serve plugs into. Path dep against
 # the local workspace until upstream publishes; switch to git when packaging.
@@ -60,6 +61,13 @@ polars-core = { version = "0.51", default-features = false, features = ["serde"]
 
 # Async runtime for the reference impl and examples.
 tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
+
+# tatami-http: HTTP client for talking to a remote tatami-serve. `rustls-tls`
+# avoids the native-tls dep tree; `json` pulls in serde_json under the hood.
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+
+# tatami-http dev-only: mock HTTP server for the wiremock-based unit tests.
+wiremock = "0.6"
 
 # Example-only — iced 0.15-dev off airstrike/iced's dev branch. Matches
 # inboard, sweeten, and fount; the fork has extra text fields (letter_spacing,

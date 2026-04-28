@@ -1,0 +1,26 @@
+[package]
+name        = "tatami-http"
+description = "tatami::Cube implementation that talks to a remote tatami-serve over HTTP."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+tatami     = { workspace = true }
+serde      = { workspace = true }
+serde_json = { workspace = true }
+thiserror  = { workspace = true }
+tokio      = { workspace = true }
+reqwest    = { workspace = true }
+
+# `url::ParseError` is the error type returned by `reqwest::Url::join`.
+# Reqwest re-exports `Url` itself but not the error type, so we name the
+# crate directly. Already a transitive dep via reqwest, so no new tree.
+url        = "2"
+
+[dev-dependencies]
+wiremock   = { workspace = true }
