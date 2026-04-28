@@ -18,7 +18,7 @@ jiff      = { workspace = true }
 serde_json = { workspace = true }
 
 [workspace]
-members  = ["inmem", "examples/*"]
+members  = ["inmem", "serve", "examples/*"]
 resolver = "3"
 
 [workspace.package]
@@ -40,6 +40,11 @@ bare_urls               = "warn"
 # goes through these, not path-relative specs.
 tatami       = { path = "." }
 tatami-inmem = { path = "inmem" }
+tatami-serve = { path = "serve" }
+
+# runway is the HTTP module surface tatami-serve plugs into. Path dep against
+# the local workspace until upstream publishes; switch to git when packaging.
+runway = { path = "../runway" }
 
 # Baseline per MAP §9 — additions to this list need a justification comment.
 serde      = { version = "1",    features = ["derive"] }

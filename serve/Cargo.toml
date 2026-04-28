@@ -1,0 +1,24 @@
+[package]
+name        = "tatami-serve"
+description = "runway::Module exposing any tatami::Cube over HTTP."
+version.workspace      = true
+edition.workspace      = true
+license.workspace      = true
+publish.workspace      = true
+
+[lints]
+workspace = true
+
+[dependencies]
+tatami     = { workspace = true }
+runway     = { workspace = true }
+serde      = { workspace = true }
+serde_json = { workspace = true }
+thiserror  = { workspace = true }
+# Required for the dedicated cube-worker thread (current-thread runtime
+# + mpsc/oneshot). See `lib.rs` "Concurrency model" for why.
+tokio      = { workspace = true }
+
+[dev-dependencies]
+tatami-inmem = { workspace = true }
+polars-core  = { workspace = true }

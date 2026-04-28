@@ -1,0 +1,23 @@
+# cargo-audit ignores for advisories whose only path into the workspace is
+# via `runway -> libsql 0.6 -> hyper-rustls 0.25 -> rustls 0.22 -> rustls-webpki 0.102`.
+# Until libsql / hyper-rustls publish bumps that pull in rustls 0.23, those
+# advisories cannot be resolved from inside this workspace. The unmaintained
+# warnings for `bincode`, `paste`, and `rustls-pemfile` are in the same chain
+# (or in the iced graphics stack) and equally out of our control.
+#
+# Re-evaluate this list whenever the runway path-dep is bumped.
+
+[advisories]
+ignore = [
+    # rustls-webpki 0.102.8 from runway -> libsql -> hyper-rustls 0.25 -> rustls 0.22.
+    "RUSTSEC-2026-0049",
+    "RUSTSEC-2026-0098",
+    "RUSTSEC-2026-0099",
+    "RUSTSEC-2026-0104",
+    # bincode 1.x / 2.x — unmaintained warning. Pulled in by libsql and polars.
+    "RUSTSEC-2025-0141",
+    # rustls-pemfile — unmaintained. Pulled in by hyper-rustls 0.25.
+    "RUSTSEC-2025-0134",
+    # paste — unmaintained. Pulled in by metal -> wgpu in the iced graphics stack.
+    "RUSTSEC-2024-0436",
+]
