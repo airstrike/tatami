@@ -20,7 +20,7 @@ use runway::Module;
 use tracing_subscriber::layer::SubscriberExt;
 use tracing_subscriber::util::SubscriberInitExt;
 
-mod cube;
+use meridianre_serve::cube;
 
 /// CLI args. Each flag has a matching `MERIDIANRE_*` env var so the
 /// binary fits naturally into shell-driven dev loops.

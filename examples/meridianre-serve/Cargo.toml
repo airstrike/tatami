@@ -9,6 +9,18 @@ publish     = false
 [lints]
 workspace = true
 
+# Both halves declared explicitly so sibling examples (meridianre-board) can
+# `use meridianre_serve::cube::build` without going through the binary path.
+# Cargo accepts a `[lib]` and `[[bin]]` side by side as long as each names a
+# distinct file.
+[lib]
+name = "meridianre_serve"
+path = "src/lib.rs"
+
+[[bin]]
+name = "meridianre-serve"
+path = "src/main.rs"
+
 [dependencies]
 tatami       = { workspace = true }
 tatami-inmem = { workspace = true }
