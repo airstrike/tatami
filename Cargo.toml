@@ -99,3 +99,9 @@ iced_widget   = { git = "https://github.com/airstrike/iced.git", branch = "dev" 
 # cosmic-text fork pairs with airstrike/iced — adds UnderlineStyle,
 # OpticalSize, FontVariations, text_decoration on Attrs, etc.
 cosmic-text = { git = "https://github.com/airstrike/cosmic-text", branch = "dev" }
+
+# Local sweeten checkout — picks up the gt::Table::on_press click handler
+# (commits 6260d9e..1b9091b) that hasn't been pushed to airstrike/sweeten
+# `dev` yet. Drop this patch once those commits land upstream.
+[patch."https://github.com/airstrike/sweeten"]
+sweeten = { path = "../sweeten" }

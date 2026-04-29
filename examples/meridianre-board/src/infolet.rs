@@ -7,9 +7,12 @@
 //! its base query at construction time.
 
 use std::fmt;
+use std::sync::Arc;
 
-use iced::widget::{Column, button, column, row, scrollable, text};
-use iced::{Element, Length};
+use iced::Element;
+use iced::widget::{column, scrollable, text};
+
+use sweeten::widget::gt;
 
 use tatami::query::{self, MemberRef, Set, Tuple};
 use tatami::schema::Name;
@@ -121,8 +124,8 @@ impl fmt::Display for Infolet {
 }
 
 /// Render a tile's `Results` to an iced [`Element`]. Tabular variants
-/// produce buttons on each row header so the user can drill in by
-/// clicking a member name.
+/// produce a `sweeten::gt::Table` whose body cells fire
+/// `Message::DrillInto` for the row's anchor member when clicked.
 ///
 /// `Results` is `#[non_exhaustive]`, so the match carries a wildcard arm
 /// surfacing unknown variants as a placeholder line — the renderer
@@ -132,11 +135,12 @@ pub fn render(results: &Results) -> Element<'_, Message> {
         Results::Scalar(r) => render_scalar(r),
         Results::Series(r) => render_series(r),
         Results::Pivot(r) => render_pivot(r),
-        Results::Rollup(t) => render_rollup(t, 0),
+        Results::Rollup(t) => render_rollup(t),
         _ => text("(unknown Results variant)").into(),
     }
 }
 
+/// Scalar rendering stays plain iced — gt is overkill for one number.
 fn render_scalar(r: &scalar::Result) -> Element<'_, Message> {
     column(
         r.values()
@@ -147,101 +151,182 @@ fn render_scalar(r: &scalar::Result) -> Element<'_, Message> {
     .into()
 }
 
-/// Series rendering: one row of `(member, value)` per x-axis member,
-/// for each metric row. The member header is a text-styled button so
-/// the user can drill into that member.
+/// Series rendering: stub column of x-axis members + one numeric column
+/// per metric row. Body clicks drill on the row's x-axis member.
 fn render_series(r: &series::Result) -> Element<'_, Message> {
-    // For each x-axis member, emit one row per metric; the leading
-    // column is a drill button on the member, the trailing columns
-    // are the metric values for that x position.
-    let header = row![
-        text("Member").width(Length::FillPortion(2)),
-        text("Value").width(Length::FillPortion(3)),
-    ];
+    let x_members: Vec<MemberRef> = r.x().to_vec();
 
-    let body_rows = r.x().iter().enumerate().map(|(i, x)| {
-        let label = format!("{}", x.path);
-        let mut value_text = String::new();
-        for series_row in r.rows() {
-            if !value_text.is_empty() {
-                value_text.push_str("  ");
-            }
-            if let Some(cell) = series_row.values.get(i) {
-                value_text.push_str(&format_cell(cell));
-            }
-        }
-        row![
-            drill_button(label, x.clone()).width(Length::FillPortion(2)),
-            text(value_text).width(Length::FillPortion(3)),
-        ]
-        .into()
-    });
+    let mut columns = vec![gt::Column::text("member", "Member")];
+    for (i, row) in r.rows().iter().enumerate() {
+        // Metric labels aren't guaranteed unique across rows; suffix the
+        // index to keep `Column::id` stable for selector targeting.
+        columns.push(gt::Column::numeric(format!("m{i}"), row.label.clone()));
+    }
 
-    column![header, Column::with_children(body_rows).spacing(2)]
-        .spacing(6)
-        .into()
+    let rows: Vec<Vec<gt::Cell>> = x_members
+        .iter()
+        .enumerate()
+        .map(|(i, x)| {
+            let mut cells = Vec::with_capacity(r.rows().len() + 1);
+            cells.push(gt::Cell::text(x.path.to_string()));
+            for series_row in r.rows() {
+                cells.push(
+                    series_row
+                        .values
+                        .get(i)
+                        .map(to_gt_cell)
+                        .unwrap_or(gt::Cell::Empty),
+                );
+            }
+            cells
+        })
+        .collect();
+
+    let drill_targets = Arc::new(x_members);
+    let table = gt::Table::new(columns, rows)
+        .stub_column("member")
+        .on_press(gt::cells::body(), {
+            let targets = Arc::clone(&drill_targets);
+            move |click: gt::Click<'_>| Message::DrillInto(targets[click.coord.row].clone())
+        })
+        .fmt(gt::cells::body(), gt::decimal(0));
+
+    scrollable(table).into()
 }
 
-/// Pivot rendering: one row per row-header tuple, one column per
-/// col-header tuple. Row headers drill on their first member.
-fn render_pivot(r: &pivot::Result) -> Element<'_, Message> {
-    // Header row: a leading blank cell, then one cell per column header.
-    let mut header_children: Vec<Element<'_, Message>> =
-        vec![text("").width(Length::FillPortion(2)).into()];
-    for col in r.col_headers() {
-        header_children.push(text(format_tuple(col)).width(Length::FillPortion(3)).into());
-    }
-    let header = iced::widget::Row::with_children(header_children).spacing(8);
+/// Rollup rendering: DFS-flatten the tree into a two-column gt table
+/// (member, value). Indent is rendered in the member text. Body clicks
+/// drill on the entry's member.
+fn render_rollup(tree: &rollup::Tree) -> Element<'_, Message> {
+    let mut flat: Vec<FlatRollup> = Vec::new();
+    flatten_rollup(tree, 0, &mut flat);
 
-    let body_rows = r
+    let columns = vec![
+        gt::Column::text("member", "Member"),
+        gt::Column::numeric("value", "Value"),
+    ];
+
+    let rows: Vec<Vec<gt::Cell>> = flat
+        .iter()
+        .map(|entry| {
+            let label = format!("{}{}", "  ".repeat(entry.depth), entry.member.path);
+            vec![gt::Cell::text(label), to_gt_cell(&entry.value)]
+        })
+        .collect();
+
+    let drill_targets: Arc<Vec<MemberRef>> = Arc::new(flat.into_iter().map(|e| e.member).collect());
+
+    let table = gt::Table::new(columns, rows)
+        .stub_column("member")
+        .on_press(gt::cells::body(), {
+            let targets = Arc::clone(&drill_targets);
+            move |click: gt::Click<'_>| Message::DrillInto(targets[click.coord.row].clone())
+        })
+        .fmt(gt::cells::body(), gt::decimal(0));
+
+    scrollable(table).into()
+}
+
+/// Pivot rendering: stub column of row-header labels + one numeric
+/// column per col-header. Body clicks drill on the row tuple's first
+/// member, when present; rows with empty tuples are non-clickable.
+fn render_pivot(r: &pivot::Result) -> Element<'_, Message> {
+    let mut columns = vec![gt::Column::text("row_header", "")];
+    for (i, col) in r.col_headers().iter().enumerate() {
+        // Use a positional id so two col-headers that format identically
+        // (unlikely but possible) still get distinct selector keys.
+        columns.push(gt::Column::numeric(format!("c{i}"), format_tuple(col)));
+    }
+
+    let rows: Vec<Vec<gt::Cell>> = r
         .row_headers()
         .iter()
         .zip(r.cells().iter())
-        .map(|(h, cells)| {
-            let label = format_tuple(h);
-            let mut children: Vec<Element<'_, Message>> = match h.members().first().cloned() {
-                Some(member) => vec![
-                    drill_button(label, member)
-                        .width(Length::FillPortion(2))
-                        .into(),
-                ],
-                None => vec![text(label).width(Length::FillPortion(2)).into()],
-            };
-            for cell in cells {
-                children.push(text(format_cell(cell)).width(Length::FillPortion(3)).into());
+        .map(|(h, row_cells)| {
+            let mut cells = Vec::with_capacity(r.col_headers().len() + 1);
+            cells.push(gt::Cell::text(format_tuple(h)));
+            for cell in row_cells {
+                cells.push(to_gt_cell(cell));
             }
-            iced::widget::Row::with_children(children).spacing(8).into()
-        });
+            cells
+        })
+        .collect();
 
-    let body = Column::with_children(body_rows).spacing(2);
-    scrollable(column![header, body].spacing(6))
-        .width(Length::Fill)
-        .into()
+    // Drill anchor per row: `Some(member)` if the row tuple has a first
+    // member, `None` otherwise. The on_press selector filters out the
+    // `None` rows so the closure only ever sees indices it can resolve.
+    let drill_targets: Arc<Vec<Option<MemberRef>>> = Arc::new(
+        r.row_headers()
+            .iter()
+            .map(|h| h.members().first().cloned())
+            .collect(),
+    );
+
+    let row_predicate = {
+        let targets = Arc::clone(&drill_targets);
+        move |row: usize| targets.get(row).is_some_and(Option::is_some)
+    };
+
+    let table = gt::Table::new(columns, rows)
+        .stub_column("row_header")
+        .on_press(gt::cells::body().rows(row_predicate), {
+            let targets = Arc::clone(&drill_targets);
+            move |click: gt::Click<'_>| {
+                let member = targets[click.coord.row]
+                    .clone()
+                    .expect("row_predicate guarantees Some at this row");
+                Message::DrillInto(member)
+            }
+        })
+        .fmt(gt::cells::body(), gt::decimal(0));
+
+    scrollable(table).into()
 }
 
-fn render_rollup(tree: &rollup::Tree, depth: u16) -> Element<'_, Message> {
-    let indent = " ".repeat(depth as usize * 2);
-    let label = format!("{indent}{}", tree.root.path);
-    let head = row![
-        drill_button(label, tree.root.clone()).width(Length::FillPortion(3)),
-        text(format_cell(&tree.value)).width(Length::FillPortion(2)),
-    ];
-    let children = tree
-        .children
-        .iter()
-        .map(|child| render_rollup(child, depth + 1));
-    column![head, Column::with_children(children).spacing(2)]
-        .spacing(2)
-        .into()
+/// One entry in a DFS flattening of a [`rollup::Tree`], used to project
+/// the recursive shape onto the flat `Vec<Vec<gt::Cell>>` gt expects.
+struct FlatRollup {
+    member: MemberRef,
+    value: Cell,
+    depth: usize,
 }
 
-/// A text-styled button that fires `Message::DrillInto` on the given
-/// member when pressed.
-fn drill_button(label: String, member: MemberRef) -> iced::widget::Button<'static, Message> {
-    button(text(label))
-        .on_press(Message::DrillInto(member))
-        .padding(0)
-        .style(button::text)
+fn flatten_rollup(tree: &rollup::Tree, depth: usize, out: &mut Vec<FlatRollup>) {
+    out.push(FlatRollup {
+        member: tree.root.clone(),
+        value: tree.value.clone(),
+        depth,
+    });
+    for child in &tree.children {
+        flatten_rollup(child, depth + 1, out);
+    }
+}
+
+/// Convert a tatami [`Cell`] to a [`gt::Cell`]. `Missing` collapses to
+/// `gt::Cell::Empty` (numeric formatters render it as the empty glyph).
+/// `Error` carries its message in-band as text so failures are visible
+/// without a separate error channel.
+fn to_gt_cell(cell: &Cell) -> gt::Cell {
+    match cell {
+        Cell::Valid {
+            value,
+            unit: _,
+            format,
+        } => {
+            // Percent-formatted values still belong to a numeric column;
+            // emit the human form as text so `gt::decimal` doesn't
+            // re-format the raw fraction.
+            if format.as_ref().is_some_and(|f| f.as_str().contains('%')) {
+                gt::Cell::text(format!("{:.1}%", value * 100.0))
+            } else {
+                gt::Cell::Number(*value)
+            }
+        }
+        Cell::Missing { .. } => gt::Cell::Empty,
+        Cell::Error { message } => gt::Cell::text(format!("! {message}")),
+        // `tatami::Cell` is `#[non_exhaustive]` — render unknowns as Empty.
+        _ => gt::Cell::Empty,
+    }
 }
 
 /// Format a tuple as a comma-separated list of leaf paths. Drops the
@@ -255,7 +340,8 @@ fn format_tuple(t: &Tuple) -> String {
         .join(", ")
 }
 
-/// Cell formatter — same shape hewton uses, minus the icon font.
+/// Cell formatter for the scalar variant — same shape hewton uses,
+/// minus the icon font.
 fn format_cell(cell: &Cell) -> String {
     match cell {
         Cell::Valid {
