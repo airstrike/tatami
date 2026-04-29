@@ -6,6 +6,7 @@
 //! trail (zero or more `(dim, member)` pairs); each infolet folds it into
 //! its base query at construction time.
 
+use std::collections::{BTreeMap, HashMap};
 use std::fmt;
 use std::sync::Arc;
 
@@ -39,7 +40,9 @@ pub enum Infolet {
     NpwByCountry,
     /// NPW summed by product line — series, x = ProductLine.
     NpwByProduct,
-    /// NPW pivoted: rows = Region, columns = Month.
+    /// NPW pivoted: rows = Country (grouped client-side by Region),
+    /// columns = Month. Each region carries a per-column summary row
+    /// summing the in-group countries.
     FinancialPivot,
     /// Year-over-year NPW change — single KPI value via the `RevenueYoY`
     /// metric defined in the meridianre schema.
@@ -66,7 +69,7 @@ impl Infolet {
             Self::NpwByMonth => "NPW by Month",
             Self::NpwByCountry => "NPW by Country",
             Self::NpwByProduct => "NPW by Product",
-            Self::FinancialPivot => "Region x Month NPW",
+            Self::FinancialPivot => "NPW · Country x Month, by Region",
             Self::RevenueYoyScalar => "Revenue YoY",
         }
     }
@@ -100,7 +103,7 @@ impl Infolet {
             ),
             Self::FinancialPivot => (
                 Axes::Pivot {
-                    rows: Set::members(n("Geography"), n("World"), n("Region")),
+                    rows: Set::members(n("Geography"), n("World"), n("Country")),
                     columns: Set::members(n("Time"), n("Calendar"), n("Month")),
                 },
                 vec![n("npw")],
@@ -227,10 +230,28 @@ fn render_rollup(tree: &rollup::Tree) -> Element<'_, Message> {
     scrollable(table).into()
 }
 
-/// Pivot rendering: stub column of row-header labels + one numeric
-/// column per col-header. Body clicks drill on the row tuple's first
-/// member, when present; rows with empty tuples are non-clickable.
+/// Pivot rendering with client-side region grouping.
+///
+/// The pivot result is `rows = Country, cols = Month`; each Country's
+/// `MemberRef.path.head()` is the parent Region under the
+/// `Geography:World` hierarchy (`Region → Country`). We bucket the
+/// rows by region into a [`BTreeMap`] (deterministic ordering across
+/// renders), emit one [`gt::RowGroup`] per region with a
+/// [`gt::SummaryRow::group`] carrying per-column sums of the
+/// in-group cells, and re-flatten the rows in the new region-grouped
+/// order so the row indices passed to `RowGroup::new` line up with
+/// the rebuilt body.
+///
+/// Body clicks drill on the row's Country member; clicks on a region
+/// label row drill on the synthesised Region member (`path = [Region]`
+/// under `Geography:World`).
+///
+/// Rows whose tuple has no leading member drop into an `"ungrouped"`
+/// bucket rendered last; for the meridianre schema this bucket is
+/// always empty.
 fn render_pivot(r: &pivot::Result) -> Element<'_, Message> {
+    let n_cols = r.col_headers().len();
+
     let mut columns = vec![gt::Column::text("row_header", "")];
     for (i, col) in r.col_headers().iter().enumerate() {
         // Use a positional id so two col-headers that format identically
@@ -238,37 +259,131 @@ fn render_pivot(r: &pivot::Result) -> Element<'_, Message> {
         columns.push(gt::Column::numeric(format!("c{i}"), format_tuple(col)));
     }
 
-    let rows: Vec<Vec<gt::Cell>> = r
-        .row_headers()
-        .iter()
-        .zip(r.cells().iter())
-        .map(|(h, row_cells)| {
-            let mut cells = Vec::with_capacity(r.col_headers().len() + 1);
-            cells.push(gt::Cell::text(format_tuple(h)));
-            for cell in row_cells {
-                cells.push(to_gt_cell(cell));
-            }
-            cells
-        })
-        .collect();
+    // Bucket original-row indices by parent-region name. A `None` key
+    // captures rows where we couldn't read a region (empty tuple, or a
+    // Country member with a single-segment path) so the renderer never
+    // silently drops data.
+    let mut buckets: BTreeMap<Option<Name>, Vec<usize>> = BTreeMap::new();
+    for (i, header) in r.row_headers().iter().enumerate() {
+        let region: Option<Name> = header.members().first().map(|m| m.path.head().clone());
+        buckets.entry(region).or_default().push(i);
+    }
 
-    // Drill anchor per row: `Some(member)` if the row tuple has a first
-    // member, `None` otherwise. The on_press selector filters out the
-    // `None` rows so the closure only ever sees indices it can resolve.
-    let drill_targets: Arc<Vec<Option<MemberRef>>> = Arc::new(
-        r.row_headers()
-            .iter()
-            .map(|h| h.members().first().cloned())
-            .collect(),
-    );
+    // Walk buckets in BTreeMap order, emitting rows contiguously per
+    // region. `body_rows` is the new row-index space passed to
+    // `Table::new`; `RowGroup::row_indices` references it directly.
+    let mut body_rows: Vec<Vec<gt::Cell>> = Vec::with_capacity(r.row_headers().len());
+    let mut drill_targets: Vec<Option<MemberRef>> = Vec::with_capacity(r.row_headers().len());
+    let mut row_groups: Vec<gt::RowGroup> = Vec::with_capacity(buckets.len());
+    let mut summary_rows: Vec<gt::SummaryRow> = Vec::with_capacity(buckets.len());
+    let mut group_targets: HashMap<String, MemberRef> = HashMap::with_capacity(buckets.len());
+
+    for (region, original_indices) in &buckets {
+        let group_id = match region {
+            Some(name) => name.as_str().to_owned(),
+            None => "ungrouped".to_owned(),
+        };
+        let group_label = group_id.clone();
+
+        // Capture the new-space indices for this region, then push the
+        // rows + drill anchors in the same iteration order.
+        let mut new_indices: Vec<usize> = Vec::with_capacity(original_indices.len());
+        // Per-column sum accumulators. `count_valid` lets us distinguish
+        // "every cell missing" (render summary as Empty) from "all
+        // valid cells happened to sum to 0.0" (render as Number(0)).
+        let mut col_sums: Vec<f64> = vec![0.0; n_cols];
+        let mut col_valid: Vec<usize> = vec![0; n_cols];
+
+        for &orig in original_indices {
+            let new_idx = body_rows.len();
+            new_indices.push(new_idx);
+
+            let header = &r.row_headers()[orig];
+            let row_cells = &r.cells()[orig];
+
+            let mut cells = Vec::with_capacity(n_cols + 1);
+            cells.push(gt::Cell::text(format_tuple(header)));
+            for (col_idx, cell) in row_cells.iter().enumerate() {
+                cells.push(to_gt_cell(cell));
+                if let Cell::Valid { value, .. } = cell
+                    && col_idx < n_cols
+                {
+                    col_sums[col_idx] += *value;
+                    col_valid[col_idx] += 1;
+                }
+            }
+            body_rows.push(cells);
+
+            drill_targets.push(header.members().first().cloned());
+        }
+
+        // Region summary row: stub + per-column total. A column with
+        // zero valid contributions renders as Empty rather than 0.0 so
+        // the eye doesn't read missing data as a real zero.
+        let mut summary_cells: Vec<gt::Cell> = Vec::with_capacity(n_cols + 1);
+        summary_cells.push(gt::Cell::Empty);
+        for col_idx in 0..n_cols {
+            if col_valid[col_idx] == 0 {
+                summary_cells.push(gt::Cell::Empty);
+            } else {
+                summary_cells.push(gt::Cell::Number(col_sums[col_idx]));
+            }
+        }
+
+        row_groups
+            .push(gt::RowGroup::new(group_id.clone(), new_indices).label(group_label.clone()));
+        summary_rows.push(gt::SummaryRow::group(
+            group_id.clone(),
+            format!("{group_label} total"),
+            summary_cells,
+        ));
+
+        // Synthesise a Region MemberRef for region-label drill. Skip
+        // for the `None` bucket — there's no region to drill on.
+        if let Some(name) = region {
+            let region_member =
+                MemberRef::new(n("Geography"), n("World"), query::Path::of(name.clone()));
+            group_targets.insert(group_id, region_member);
+        }
+    }
+
+    let drill_targets: Arc<Vec<Option<MemberRef>>> = Arc::new(drill_targets);
+    let group_targets: Arc<HashMap<String, MemberRef>> = Arc::new(group_targets);
 
     let row_predicate = {
         let targets = Arc::clone(&drill_targets);
         move |row: usize| targets.get(row).is_some_and(Option::is_some)
     };
 
-    let table = gt::Table::new(columns, rows)
+    // Region-label drill is registered before the body fallback so a
+    // click on a group-header row resolves to the synthesised Region
+    // member rather than dropping through to the body handler. The
+    // closure resolves `click.coord.group` against `group_targets`;
+    // ids without a target (the orphan bucket) fall through to the
+    // body handler, which itself filters by `row_predicate`.
+    let table = gt::Table::new(columns, body_rows)
         .stub_column("row_header")
+        .row_groups(row_groups)
+        .summary_rows(summary_rows)
+        .on_press(gt::cells::row_group_labels(), {
+            let region_targets = Arc::clone(&group_targets);
+            // Register a body-row anchor as a benign last-resort drill
+            // target for the unreachable "no region" group click — every
+            // Country in the meridianre cube has a region, so this
+            // closure path never runs for known data.
+            let body_anchor = drill_targets
+                .iter()
+                .find_map(|m| m.clone())
+                .unwrap_or_else(MemberRef::world);
+            move |click: gt::Click<'_>| {
+                let member = click
+                    .coord
+                    .group
+                    .and_then(|gid| region_targets.get(gid).cloned())
+                    .unwrap_or_else(|| body_anchor.clone());
+                Message::DrillInto(member)
+            }
+        })
         .on_press(gt::cells::body().rows(row_predicate), {
             let targets = Arc::clone(&drill_targets);
             move |click: gt::Click<'_>| {
@@ -278,7 +393,10 @@ fn render_pivot(r: &pivot::Result) -> Element<'_, Message> {
                 Message::DrillInto(member)
             }
         })
-        .fmt(gt::cells::body(), gt::decimal(0));
+        .fmt(
+            gt::cells::body().union(gt::cells::summary()),
+            gt::decimal(0),
+        );
 
     scrollable(table).into()
 }
