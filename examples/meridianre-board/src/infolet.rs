@@ -16,7 +16,7 @@ use iced::widget::{column, scrollable, text};
 use sweeten::widget::gt;
 
 use tatami::query::{self, MemberRef, Set, Tuple};
-use tatami::schema::Name;
+use tatami::schema::{Format, Name};
 use tatami::{Axes, Cell, Query, Results, pivot, rollup, scalar, series};
 
 use crate::board::Message;
@@ -186,13 +186,28 @@ fn render_series(r: &series::Result) -> Element<'_, Message> {
         .collect();
 
     let drill_targets = Arc::new(x_members);
-    let table = gt::Table::new(columns, rows)
+    // Register the global default first; per-metric formatters land
+    // afterwards on a more specific selector. gt's resolver walks the
+    // formatter list in registration order and the LAST match wins (see
+    // `resolve_formatter` in sweeten/src/widget/gt.rs), so per-column
+    // overrides must come after the broad fallback.
+    let mut table = gt::Table::new(columns, rows)
         .stub_column("member")
         .on_press(gt::cells::body(), {
             let targets = Arc::clone(&drill_targets);
             move |click: gt::Click<'_>| Message::DrillInto(targets[click.coord.row].clone())
         })
         .fmt(gt::cells::body(), gt::decimal(0));
+    for (i, series_row) in r.rows().iter().enumerate() {
+        let hint = series_row.values.iter().find_map(|c| match c {
+            Cell::Valid { format, .. } => format.as_ref(),
+            _ => None,
+        });
+        table = table.fmt(
+            gt::cells::body().columns([format!("m{i}")]),
+            formatter_for(hint),
+        );
+    }
 
     scrollable(table).into()
 }
@@ -217,15 +232,31 @@ fn render_rollup(tree: &rollup::Tree) -> Element<'_, Message> {
         })
         .collect();
 
+    // Sample the first valid cell across the flattened tree to decide
+    // the value column's formatter. Cloned to a local because `flat`
+    // gets consumed below to build the drill-target vector. A
+    // wholly-missing rollup falls back to plain `decimal(0)` via
+    // `formatter_for(None)`.
+    let value_hint: Option<Format> = flat.iter().find_map(|e| match &e.value {
+        Cell::Valid { format, .. } => format.clone(),
+        _ => None,
+    });
+
     let drill_targets: Arc<Vec<MemberRef>> = Arc::new(flat.into_iter().map(|e| e.member).collect());
 
+    // Same registration-order rule as `render_series`: broad default
+    // first, per-column override after.
     let table = gt::Table::new(columns, rows)
         .stub_column("member")
         .on_press(gt::cells::body(), {
             let targets = Arc::clone(&drill_targets);
             move |click: gt::Click<'_>| Message::DrillInto(targets[click.coord.row].clone())
         })
-        .fmt(gt::cells::body(), gt::decimal(0));
+        .fmt(gt::cells::body(), gt::decimal(0))
+        .fmt(
+            gt::cells::body().columns(["value"]),
+            formatter_for(value_hint.as_ref()),
+        );
 
     scrollable(table).into()
 }
@@ -398,6 +429,28 @@ fn render_pivot(r: &pivot::Result) -> Element<'_, Message> {
             gt::decimal(0),
         );
 
+    // Pivot today carries a single metric across every `c{i}` column,
+    // so one shared formatter covers every data column plus the
+    // per-region summary row. Sample any valid cell in the result to
+    // pull the cube's format hint.
+    //
+    // Future debt: a percent metric pivoted over regions still has the
+    // per-region summary computed as a SUM (see the accumulator above)
+    // — that's nonsensical for ratios. When percent metrics enter the
+    // pivot path, the per-group aggregation needs to switch to weighted
+    // average (or the cube needs to publish the right aggregator).
+    let pivot_hint = r.cells().iter().flatten().find_map(|c| match c {
+        Cell::Valid { format, .. } => format.as_ref(),
+        _ => None,
+    });
+    let data_col_ids: Vec<String> = (0..n_cols).map(|i| format!("c{i}")).collect();
+    let table = table.fmt(
+        gt::cells::body()
+            .columns(data_col_ids.clone())
+            .union(gt::cells::summary().columns(data_col_ids)),
+        formatter_for(pivot_hint),
+    );
+
     scrollable(table).into()
 }
 
@@ -424,27 +477,68 @@ fn flatten_rollup(tree: &rollup::Tree, depth: usize, out: &mut Vec<FlatRollup>) 
 /// `gt::Cell::Empty` (numeric formatters render it as the empty glyph).
 /// `Error` carries its message in-band as text so failures are visible
 /// without a separate error channel.
+///
+/// Numeric values pass through as `gt::Cell::Number` regardless of the
+/// cell's `format` hint — the per-column [`gt::Formatter`] registered
+/// by each renderer turns the raw `f64` into the rendered string. See
+/// [`formatter_for`].
 fn to_gt_cell(cell: &Cell) -> gt::Cell {
     match cell {
-        Cell::Valid {
-            value,
-            unit: _,
-            format,
-        } => {
-            // Percent-formatted values still belong to a numeric column;
-            // emit the human form as text so `gt::decimal` doesn't
-            // re-format the raw fraction.
-            if format.as_ref().is_some_and(|f| f.as_str().contains('%')) {
-                gt::Cell::text(format!("{:.1}%", value * 100.0))
-            } else {
-                gt::Cell::Number(*value)
-            }
-        }
+        Cell::Valid { value, .. } => gt::Cell::Number(*value),
         Cell::Missing { .. } => gt::Cell::Empty,
         Cell::Error { message } => gt::Cell::text(format!("! {message}")),
         // `tatami::Cell` is `#[non_exhaustive]` — render unknowns as Empty.
         _ => gt::Cell::Empty,
     }
+}
+
+/// Pick a [`gt::Formatter`] from a tatami [`Format`] hint.
+///
+/// The hint shape is the cube's contract — meridianre uses `"0.0%"` for
+/// every percent metric, and unannotated measures default to `None`. The
+/// patterns recognised:
+///
+/// - `None` → [`gt::decimal`]`(0)`. Plain integer with thousands.
+/// - `"…%"` → [`gt::percent`]`(decimals)` where `decimals` counts the
+///   trailing `0`s after the dot in the part before `%`. `"0.0%"` →
+///   one decimal; `"0%"` → zero decimals.
+/// - `"0…"` (decimal pattern) → [`gt::decimal`]`(decimals)` counting
+///   the same way.
+/// - Anything else → [`gt::decimal`]`(0)` as a safe default.
+///
+/// Currency (`"$0.00"`), scaled (`"0.0M"`), and scientific patterns are
+/// deferred — none of meridianre's metrics use them. They want a richer
+/// representation than ad-hoc string sniffing (see the schema's `Unit`
+/// field), and the cube would need to land that contract first.
+fn formatter_for(hint: Option<&Format>) -> gt::Formatter {
+    let Some(format) = hint else {
+        return gt::decimal(0);
+    };
+    let s = format.as_str().trim();
+    if let Some(rest) = s.strip_suffix('%') {
+        return gt::percent(decimals_in(rest));
+    }
+    if s.starts_with('0') {
+        return gt::decimal(decimals_in(s));
+    }
+    gt::decimal(0)
+}
+
+/// Count the trailing zeros after the first `.` in a numeric format
+/// pattern. `"0.0"` → 1; `"0.00"` → 2; `"0"` → 0.
+///
+/// The walk stops at the first non-`'0'` so `"0.00#"` (mixed required /
+/// optional digits, ignored in v0.1) reads as 2.
+fn decimals_in(pattern: &str) -> u8 {
+    pattern
+        .split_once('.')
+        .map(|(_, frac)| {
+            frac.chars()
+                .take_while(|c| *c == '0')
+                .count()
+                .min(u8::MAX as usize) as u8
+        })
+        .unwrap_or(0)
 }
 
 /// Format a tuple as a comma-separated list of leaf paths. Drops the
