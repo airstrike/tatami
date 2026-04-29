@@ -18,6 +18,7 @@
 //! this module contributes only the picker view + the formatter shop.
 
 use std::collections::{BTreeMap, HashMap};
+use std::fmt;
 use std::sync::Arc;
 
 use iced::Element;
@@ -31,7 +32,47 @@ use tatami::{Cell, Results, pivot, rollup, scalar, series};
 
 use crate::board::Message;
 
-/// Top-bar pickers: `(Measure | Metric)`, `Dimension`, `Hierarchy`.
+/// Picker shape for the rows-axis projection.
+///
+/// Each variant maps onto a single composed [`tatami::Axes`] shape; the
+/// inmem evaluator then chooses the [`Results`] variant. In particular,
+/// [`AxisMode::Rollup`] composes an `Axes::Pivot { rows: Descendants(..) }`
+/// with a single top-level ancestor — the inmem pivot path
+/// short-circuits that into [`Results::Rollup`]
+/// (`inmem/eval/query.rs:144-163`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum AxisMode {
+    /// One axis (rows). Renders as [`Results::Series`].
+    Series,
+    /// Two axes (rows × columns). Renders as [`Results::Pivot`].
+    Pivot,
+    /// Single hierarchy descended top-to-leaf with a single root.
+    /// Renders as [`Results::Rollup`] when the rows hierarchy has
+    /// exactly one top-level member; otherwise the rollup short-circuit
+    /// in `inmem/eval/query.rs` falls through to a flat
+    /// [`Results::Pivot`].
+    Rollup,
+}
+
+impl fmt::Display for AxisMode {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Series => f.write_str("Series"),
+            Self::Pivot => f.write_str("Pivot"),
+            Self::Rollup => f.write_str("Rollup"),
+        }
+    }
+}
+
+/// All axis modes in pick-list order.
+#[must_use]
+pub fn modes() -> Vec<AxisMode> {
+    vec![AxisMode::Series, AxisMode::Pivot, AxisMode::Rollup]
+}
+
+/// Top-bar pickers: `(Measure | Metric)`, `Dimension`, `Hierarchy`,
+/// and the axis mode (Series / Pivot / Rollup).
 ///
 /// Every option list is built from `Schema` only — no string literals
 /// originating in this binary cross the `Name` boundary.
@@ -40,6 +81,7 @@ pub fn pickers<'a>(
     measure: Option<&'a Name>,
     dim: Option<&'a Name>,
     hierarchy: Option<&'a Name>,
+    axis_mode: AxisMode,
 ) -> Element<'a, Message> {
     let measure_options = measure_options(schema);
     let dim_options = dim_options(schema);
@@ -64,8 +106,50 @@ pub fn pickers<'a>(
     .placeholder("(hierarchy)")
     .padding(8);
 
-    row![measure_picker, dim_picker, hierarchy_picker]
+    let axis_mode_picker = pick_list(Some(axis_mode), modes(), |m: &AxisMode| m.to_string())
+        .on_select(Message::PickAxisMode)
+        .placeholder("(axes)")
+        .padding(8);
+
+    row![
+        measure_picker,
+        dim_picker,
+        hierarchy_picker,
+        axis_mode_picker
+    ]
+    .spacing(8)
+    .into()
+}
+
+/// Column-axis pickers — only meaningful when the active axis mode is
+/// [`AxisMode::Pivot`]. Renders a labelled `Columns:` row carrying a
+/// `(col_dim, col_hierarchy)` pair, drawn from the same `Schema` source
+/// as the rows-axis pickers above.
+pub fn column_pickers<'a>(
+    schema: &'a Schema,
+    col_dim: Option<&'a Name>,
+    col_hierarchy: Option<&'a Name>,
+) -> Element<'a, Message> {
+    let dim_options = dim_options(schema);
+    let hierarchy_options = hierarchy_options(schema, col_dim);
+
+    let dim_picker = pick_list(col_dim.cloned(), dim_options, |n: &Name| {
+        n.as_str().to_owned()
+    })
+    .on_select(Message::PickColDim)
+    .placeholder("(column dimension)")
+    .padding(8);
+
+    let hierarchy_picker = pick_list(col_hierarchy.cloned(), hierarchy_options, |n: &Name| {
+        n.as_str().to_owned()
+    })
+    .on_select(Message::PickColHierarchy)
+    .placeholder("(column hierarchy)")
+    .padding(8);
+
+    row![text("Columns:").size(12), dim_picker, hierarchy_picker]
         .spacing(8)
+        .align_y(iced::Alignment::Center)
         .into()
 }
 
@@ -116,6 +200,23 @@ pub fn top_level(schema: &Schema, dim: &Name, hierarchy: &Name) -> Option<Name> 
         .map(|l| l.name.clone())
 }
 
+/// Last level under `(dim, hierarchy)`. The Rollup-axis composition
+/// descends to here, so the inmem `Descendants` evaluator walks the
+/// hierarchy from the top member down through every intermediate level
+/// to its leaves.
+pub fn leaf_level(schema: &Schema, dim: &Name, hierarchy: &Name) -> Option<Name> {
+    schema
+        .dimensions
+        .iter()
+        .find(|d| &d.name == dim)?
+        .hierarchies
+        .iter()
+        .find(|h| &h.name == hierarchy)?
+        .levels
+        .last()
+        .map(|l| l.name.clone())
+}
+
 /// First-of-each defaults. Returns `(measure, dim, hierarchy)` —
 /// any of the three may be `None` for a degenerate schema, in which
 /// case the board lands in the idle results state.
@@ -126,6 +227,25 @@ pub fn defaults(schema: &Schema) -> (Option<Name>, Option<Name>, Option<Name>) {
         .as_ref()
         .and_then(|d| hierarchy_options(schema, Some(d)).into_iter().next());
     (measure, dim, hierarchy)
+}
+
+/// Column-axis defaults — used by [`AxisMode::Pivot`]. Picks the first
+/// dim that is *not* `rows_dim` (so the cross-product spans two
+/// distinct dimensions); falls back to `rows_dim` itself when the
+/// schema has only one dim, in which case the inmem evaluator will
+/// produce a degenerate single-dim pivot rather than crashing. The
+/// hierarchy default is the chosen dim's first hierarchy.
+pub fn default_columns(schema: &Schema, rows_dim: Option<&Name>) -> (Option<Name>, Option<Name>) {
+    let col_dim = schema
+        .dimensions
+        .iter()
+        .find(|d| Some(&d.name) != rows_dim)
+        .or_else(|| schema.dimensions.first())
+        .map(|d| d.name.clone());
+    let col_hierarchy = col_dim
+        .as_ref()
+        .and_then(|d| hierarchy_options(schema, Some(d)).into_iter().next());
+    (col_dim, col_hierarchy)
 }
 
 /// Render the focus breadcrumb. The leftmost button resets to the

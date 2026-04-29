@@ -28,7 +28,7 @@
 
 use std::sync::{Arc, Mutex};
 
-use iced::widget::{column, container, scrollable, text};
+use iced::widget::{container, scrollable, text};
 use iced::{Element, Length, Task};
 
 use tatami::Cube;
@@ -36,7 +36,7 @@ use tatami::query::{MemberRef, Set, Tuple};
 use tatami::schema::{self, Schema};
 use tatami::{Axes, Query, Results, query};
 
-use crate::composer;
+use crate::composer::{self, AxisMode};
 use crate::server::Boot;
 
 /// One-shot carrier for non-Clone boot artefacts. iced messages must be
@@ -88,6 +88,17 @@ pub struct Ready {
     /// Currently-selected hierarchy under [`Self::dim`]. The dim's
     /// first hierarchy is default; resets on a dim change.
     pub hierarchy: Option<schema::Name>,
+    /// Active rows-axis projection. [`AxisMode::Series`] is the default;
+    /// the rows-axis pickers above drive whichever hierarchy is in play.
+    pub axis_mode: AxisMode,
+    /// Column-axis dimension — read only when `axis_mode` is
+    /// [`AxisMode::Pivot`]. Default is the first dim that is *not*
+    /// [`Self::dim`]; falls back to [`Self::dim`] for single-dim schemas
+    /// (see [`composer::default_columns`]).
+    pub col_dim: Option<schema::Name>,
+    /// Column-axis hierarchy under [`Self::col_dim`]. Resets on a
+    /// `col_dim` change.
+    pub col_hierarchy: Option<schema::Name>,
     /// Drill-into stack — empty means "rows axis is the top level of
     /// the chosen hierarchy". Each entry is a member the user clicked.
     pub focus: Vec<MemberRef>,
@@ -156,6 +167,17 @@ pub enum Message {
     PickDim(schema::Name),
     /// User picked a hierarchy under the current dim.
     PickHierarchy(schema::Name),
+    /// User picked an axis mode (Series / Pivot / Rollup). Resets the
+    /// focus stack — drill semantics differ across modes and a fresh
+    /// focus is the clearest entry point into the new shape.
+    PickAxisMode(AxisMode),
+    /// User picked the column-axis dimension (only meaningful in
+    /// [`AxisMode::Pivot`]). Resets `col_hierarchy` to the new dim's
+    /// first hierarchy.
+    PickColDim(schema::Name),
+    /// User picked the column-axis hierarchy (only meaningful in
+    /// [`AxisMode::Pivot`]).
+    PickColHierarchy(schema::Name),
     /// User clicked a member name — push onto the focus stack and
     /// re-fire.
     FocusInto(MemberRef),
@@ -203,6 +225,8 @@ impl App {
                     return Task::none();
                 };
                 let (measure, dim, hierarchy) = composer::defaults(&bundle.schema);
+                let (col_dim, col_hierarchy) =
+                    composer::default_columns(&bundle.schema, dim.as_ref());
                 let results = match bundle.initial {
                     Some(r) => ResultsState::Ready(r),
                     None => ResultsState::Idle,
@@ -214,6 +238,9 @@ impl App {
                     measure,
                     dim,
                     hierarchy,
+                    axis_mode: AxisMode::Series,
+                    col_dim,
+                    col_hierarchy,
                     focus: Vec::new(),
                     slicer: Vec::new(),
                     results,
@@ -252,6 +279,46 @@ impl App {
                 ready.hierarchy = Some(name);
                 ready.focus.clear();
                 fire_active_query(ready)
+            }
+            Message::PickAxisMode(mode) => {
+                let Phase::Ready(ready) = &mut self.phase else {
+                    return Task::none();
+                };
+                ready.axis_mode = mode;
+                // Drill semantics differ across axis shapes — a Pivot
+                // row-click resolves to a member but the same click on
+                // a Rollup descends the tree's natural structure. A
+                // fresh focus is the clearest entry point into the new
+                // shape.
+                ready.focus.clear();
+                fire_active_query(ready)
+            }
+            Message::PickColDim(name) => {
+                let Phase::Ready(ready) = &mut self.phase else {
+                    return Task::none();
+                };
+                ready.col_dim = Some(name);
+                ready.col_hierarchy = ready.col_dim.as_ref().and_then(|d| {
+                    composer::hierarchy_options(&ready.schema, Some(d))
+                        .into_iter()
+                        .next()
+                });
+                if matches!(ready.axis_mode, AxisMode::Pivot) {
+                    fire_active_query(ready)
+                } else {
+                    Task::none()
+                }
+            }
+            Message::PickColHierarchy(name) => {
+                let Phase::Ready(ready) = &mut self.phase else {
+                    return Task::none();
+                };
+                ready.col_hierarchy = Some(name);
+                if matches!(ready.axis_mode, AxisMode::Pivot) {
+                    fire_active_query(ready)
+                } else {
+                    Task::none()
+                }
             }
             Message::FocusInto(member) => {
                 let Phase::Ready(ready) = &mut self.phase else {
@@ -328,6 +395,7 @@ fn view_ready(ready: &Ready) -> Element<'_, Message> {
         ready.measure.as_ref(),
         ready.dim.as_ref(),
         ready.hierarchy.as_ref(),
+        ready.axis_mode,
     );
     let breadcrumb = composer::breadcrumb(ready.hierarchy.as_ref(), &ready.focus);
     let slicer_view = composer::slicer_trail(&ready.slicer);
@@ -351,22 +419,40 @@ fn view_ready(ready: &Ready) -> Element<'_, Message> {
     .width(Length::Fill)
     .height(Length::Fill);
 
-    column![pickers, breadcrumb, slicer_view, body]
+    // Column-axis pickers are only meaningful in Pivot mode; Rollup
+    // ignores its columns set (the pivot short-circuit fires before
+    // the columns ever resolve), and Series has no second axis.
+    let mut stack: Vec<Element<'_, Message>> = vec![pickers];
+    if matches!(ready.axis_mode, AxisMode::Pivot) {
+        stack.push(composer::column_pickers(
+            &ready.schema,
+            ready.col_dim.as_ref(),
+            ready.col_hierarchy.as_ref(),
+        ));
+    }
+    stack.push(breadcrumb);
+    stack.push(slicer_view);
+    stack.push(body.into());
+
+    iced::widget::Column::with_children(stack)
         .spacing(8)
         .padding(8)
         .into()
 }
 
-/// Build the active query from `(measure, dim, hierarchy, focus, slicer)`,
-/// then evaluate it. A degenerate schema (any of the three picks
-/// missing, or the chosen `(dim, hierarchy)` having no levels) lands
-/// the result panel on `Idle`.
+/// Build the active query from the rows-axis picks plus, when the axis
+/// mode requires it, the column-axis picks; then evaluate it. A
+/// degenerate schema (any required pick missing, or a `(dim, hierarchy)`
+/// with no levels) lands the result panel on `Idle`.
 fn fire_active_query(ready: &mut Ready) -> Task<Message> {
     let Some(query) = build_query(
         &ready.schema,
         ready.measure.as_ref(),
         ready.dim.as_ref(),
         ready.hierarchy.as_ref(),
+        ready.axis_mode,
+        ready.col_dim.as_ref(),
+        ready.col_hierarchy.as_ref(),
         &ready.focus,
         &ready.slicer,
     ) else {
@@ -381,15 +467,34 @@ fn fire_active_query(ready: &mut Ready) -> Task<Message> {
     )
 }
 
-/// Compose the rows axis from `focus`: empty → top level of
-/// `(dim, hierarchy)`; otherwise → children of the topmost focused
-/// member. The query is only well-formed when all three picks resolve
+/// Compose the query's [`Axes`] from the rows-axis picks and the active
+/// [`AxisMode`]:
+///
+/// - [`AxisMode::Series`] — `Axes::Series { rows }` where `rows` is the
+///   top level of `(dim, hierarchy)` when `focus` is empty, else the
+///   children of the top focused member.
+/// - [`AxisMode::Pivot`] — `Axes::Pivot { rows, columns }` where
+///   `columns` is the top level of `(col_dim, col_hierarchy)`.
+/// - [`AxisMode::Rollup`] — `Axes::Pivot { rows: Descendants(..), columns }`
+///   sized so the inmem evaluator's rollup short-circuit
+///   (`inmem/eval/query.rs:144-163`) fires when the rows hierarchy has
+///   a single top member; multi-root schemas fall through to a flat
+///   pivot, the documented honest fallback. `columns` for Rollup is a
+///   `Set::members` of the rows hierarchy itself — required by the
+///   `Pivot` shape, ignored by the rollup short-circuit. See the inline
+///   comment.
+///
+/// The query is only well-formed when every required pick resolves
 /// against the schema.
+#[allow(clippy::too_many_arguments)]
 fn build_query(
     schema: &Schema,
     measure: Option<&schema::Name>,
     dim: Option<&schema::Name>,
     hierarchy: Option<&schema::Name>,
+    axis_mode: AxisMode,
+    col_dim: Option<&schema::Name>,
+    col_hierarchy: Option<&schema::Name>,
     focus: &[MemberRef],
     slicer: &[(schema::Name, MemberRef)],
 ) -> Option<Query> {
@@ -398,11 +503,55 @@ fn build_query(
     let hierarchy = hierarchy?.clone();
     let top = composer::top_level(schema, &dim, &hierarchy)?;
 
-    let rows = match focus.last() {
-        None => Set::members(dim, hierarchy, top),
-        Some(parent) => Set::from_member(parent.clone()).children(),
+    let axes = match axis_mode {
+        AxisMode::Series => {
+            let rows = match focus.last() {
+                None => Set::members(dim, hierarchy, top),
+                Some(parent) => Set::from_member(parent.clone()).children(),
+            };
+            Axes::Series { rows }
+        }
+        AxisMode::Pivot => {
+            let rows = match focus.last() {
+                None => Set::members(dim.clone(), hierarchy.clone(), top),
+                Some(parent) => Set::from_member(parent.clone()).children(),
+            };
+            let col_dim = col_dim?.clone();
+            let col_hierarchy = col_hierarchy?.clone();
+            let col_top = composer::top_level(schema, &col_dim, &col_hierarchy)?;
+            let columns = Set::members(col_dim, col_hierarchy, col_top);
+            Axes::Pivot { rows, columns }
+        }
+        AxisMode::Rollup => {
+            let leaf = composer::leaf_level(schema, &dim, &hierarchy)?;
+            // Root: a non-empty focus pins drilling at the focused
+            // member; otherwise descend from every member at the
+            // hierarchy's top level. The inmem evaluator's rollup
+            // short-circuit (`inmem/eval/query.rs:144-163`) fires only
+            // when the resulting `Descendants` output shares a single
+            // top-level ancestor — i.e. either focus is non-empty or
+            // the top level is itself a singleton. Multi-root tops
+            // fall through to a flat pivot, which is the documented
+            // honest fallback at that call site.
+            let root = match focus.last() {
+                Some(member) => Set::from_member(member.clone()),
+                None => Set::members(dim.clone(), hierarchy.clone(), top.clone()),
+            };
+            // `Axes::Pivot` requires a columns set, but the rollup
+            // short-circuit returns `Results::Rollup` before the
+            // columns axis is evaluated. We therefore reuse the rows
+            // hierarchy's top level — well-formed by construction (we
+            // just resolved `top`) and zero-cost when the
+            // short-circuit fires. If the short-circuit doesn't fire
+            // and we fall through to a real pivot, the columns being
+            // the rows hierarchy's top is a safe degenerate shape.
+            let columns = Set::members(dim, hierarchy, top);
+            Axes::Pivot {
+                rows: root.descendants_to(leaf),
+                columns,
+            }
+        }
     };
-    let axes = Axes::Series { rows };
 
     // By construction each dim appears at most once in the trail, so
     // `Tuple::of`'s uniqueness check always succeeds.
@@ -442,11 +591,15 @@ async fn boot_and_initial_query() -> Result<BootBundle, String> {
     let schema = Arc::new(schema);
 
     let (measure, dim, hierarchy) = composer::defaults(&schema);
+    let (col_dim, col_hierarchy) = composer::default_columns(&schema, dim.as_ref());
     let initial = match build_query(
         &schema,
         measure.as_ref(),
         dim.as_ref(),
         hierarchy.as_ref(),
+        AxisMode::Series,
+        col_dim.as_ref(),
+        col_hierarchy.as_ref(),
         &[],
         &[],
     ) {
