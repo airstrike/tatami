@@ -1,11 +1,12 @@
-//! `meridianre-board` — drill-down GUI demo over the meridianre cube.
+//! `meridianre-board` — schema-blind drill-down GUI demo over a cube
+//! served by `tatami-serve`.
 //!
 //! Boots `tatami-serve` in-process on `127.0.0.1:0`, points a
-//! [`tatami_http::Remote`] at the resulting URL, and renders one of six
-//! pre-defined dashboard tiles. Clicking a member name in any row drills
-//! the cube down by pinning that member onto a slicer trail; switching
-//! tiles preserves the trail (drill-across); clicking the × on a chip
-//! pops that index (drill-up).
+//! [`tatami_http::Remote`] at the resulting URL, and runs a composer
+//! UI that drives every picker — measure, dimension, hierarchy — off
+//! the introspected `Schema` alone. The binary holds **zero**
+//! knowledge of any specific schema name; pointed at a different cube
+//! the pickers repopulate themselves.
 //!
 //! Run via `cargo run -p meridianre-board`. The CSV path follows the
 //! same `MERIDIANRE_DATA_DIR` env-var convention as the
@@ -19,7 +20,7 @@ use tracing_subscriber::layer::SubscriberExt;
 use tracing_subscriber::util::SubscriberInitExt;
 
 mod board;
-mod infolet;
+mod composer;
 mod server;
 
 fn main() -> iced::Result {
