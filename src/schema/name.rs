@@ -64,8 +64,12 @@ impl Serialize for Name {
 
 impl<'de> Deserialize<'de> for Name {
     fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
-        let raw = <&str>::deserialize(deserializer)?;
-        Self::parse(raw).map_err(serde::de::Error::custom)
+        // Accept both borrowed and owned strings. Some deserializers
+        // (e.g. inboard's `decoder::Value::String(v)`) call
+        // `visit_string` even when the underlying buffer is borrowable;
+        // `Cow<str>` adapts to whichever path the deserializer takes.
+        let raw = std::borrow::Cow::<'de, str>::deserialize(deserializer)?;
+        Self::parse(&raw).map_err(serde::de::Error::custom)
     }
 }
 

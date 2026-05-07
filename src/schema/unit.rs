@@ -50,8 +50,10 @@ impl Serialize for Unit {
 
 impl<'de> Deserialize<'de> for Unit {
     fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
-        let raw = <&str>::deserialize(deserializer)?;
-        Self::parse(raw).map_err(serde::de::Error::custom)
+        // Accept both borrowed and owned strings — see `Name::deserialize`
+        // for the rationale.
+        let raw = std::borrow::Cow::<'de, str>::deserialize(deserializer)?;
+        Self::parse(&raw).map_err(serde::de::Error::custom)
     }
 }
 
